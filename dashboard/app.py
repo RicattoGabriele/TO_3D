@@ -16,6 +16,7 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import trimesh
 
 from physics_engine.simp_engine_3d import SIMPOptimizer3D, SIMPResult3D
 
@@ -43,14 +44,15 @@ st.markdown("""
         color: #ffffff !important;
     }
 
-    /* Hide Streamlit Chrome & Headers */
-    #MainMenu, footer {
+    /* Completely hide Streamlit Header, Toolbar & Deploy Button */
+    header[data-testid="stHeader"], [data-testid="stToolbar"], #MainMenu, footer {
+        display: none !important;
         visibility: hidden !important;
         height: 0 !important;
     }
-    header[data-testid="stHeader"] {
-        background-color: #000000 !important;
-        height: 1.5rem !important;
+    .block-container {
+        padding-top: 1.2rem !important;
+        padding-bottom: 2rem !important;
     }
 
     /* Sidebar */
@@ -64,15 +66,15 @@ st.markdown("""
 
     /* Section Headers */
     .sec-head {
-        font-size: 0.82rem;
+        font-size: 0.80rem;
         font-weight: 500 !important;
         letter-spacing: 0.12em;
         text-transform: uppercase;
         color: #a1a1aa;
         border-bottom: 1px solid #18181b;
-        padding-bottom: 4px;
-        margin-top: 1rem;
-        margin-bottom: 0.6rem;
+        padding-bottom: 3px;
+        margin-top: 0.8rem;
+        margin-bottom: 0.5rem;
     }
 
     /* Radio Buttons - Zero Orange, Pure White Checked */
@@ -81,7 +83,7 @@ st.markdown("""
     }
     div[data-testid="stRadio"] label {
         color: #ffffff !important;
-        font-size: 0.88rem !important;
+        font-size: 0.85rem !important;
     }
     div[data-testid="stRadio"] div[role="radio"] {
         background-color: transparent !important;
@@ -143,7 +145,7 @@ st.markdown("""
     div[data-testid="stSlider"] [data-testid="stTickBarMin"],
     div[data-testid="stSlider"] [data-testid="stTickBarMax"] {
         color: #52525b !important;
-        font-size: 0.75rem !important;
+        font-size: 0.72rem !important;
     }
 
     /* Inputs & Selectboxes */
@@ -212,12 +214,12 @@ st.markdown("""
     [data-testid="stMetricValue"] {
         font-weight: 500 !important;
         color: #ffffff !important;
-        font-size: 1.15rem !important;
+        font-size: 1.10rem !important;
     }
     [data-testid="stMetricLabel"] {
         font-weight: 300 !important;
         color: #71717a !important;
-        font-size: 0.72rem !important;
+        font-size: 0.70rem !important;
         letter-spacing: 0.08em;
         text-transform: uppercase;
     }
@@ -244,7 +246,7 @@ st.markdown("""
 
 
 # -----------------------------------------------------------------------------
-# 3D Domain Preview Function (Delicate Micro-Markers, Wireframe Parallelepiped)
+# 3D Domain Preview Function (Delicate Micro-Markers, Wireframe Box, Exact CAD Mesh)
 # -----------------------------------------------------------------------------
 def build_domain_preview_figure(
     nelx: int, nely: int, nelz: int,
@@ -264,7 +266,7 @@ def build_domain_preview_figure(
 
     fig = go.Figure()
 
-    # 1. Bounding Box Wireframe (Delicate 1.5px lines)
+    # 1. Bounding Box Wireframe (Clean 1.5px lines)
     fig.add_trace(go.Scatter3d(
         x=[
             0, Lx, Lx, 0, 0, None,
@@ -291,7 +293,7 @@ def build_domain_preview_figure(
             0, Lz
         ],
         mode="lines",
-        line=dict(color="#3f3f46", width=1.5),
+        line=dict(color="#52525b", width=1.5),
         name="Domain",
         hoverinfo="skip",
         showlegend=False
@@ -312,7 +314,7 @@ def build_domain_preview_figure(
         showlegend=False
     ))
 
-    # 2. Fixed Support Markers (Small, discrete cyan squares: size=4)
+    # 2. Fixed Support Markers (Small, discrete cyan squares: size=3.5)
     if fixed_nodes_coords:
         fx_x = [pt[0] for pt in fixed_nodes_coords]
         fx_y = [pt[1] for pt in fixed_nodes_coords]
@@ -323,7 +325,7 @@ def build_domain_preview_figure(
             x=fx_x, y=fx_y, z=fx_z,
             mode="markers",
             marker=dict(
-                size=4,
+                size=3.5,
                 color="#00f5d4",
                 symbol="square",
                 opacity=0.95
@@ -345,7 +347,7 @@ def build_domain_preview_figure(
                 x=[lx], y=[ly], z=[lz],
                 mode="markers",
                 marker=dict(
-                    size=4.5,
+                    size=4.0,
                     color="#ff0055",
                     symbol="diamond",
                     opacity=1.0
@@ -356,7 +358,7 @@ def build_domain_preview_figure(
                 showlegend=False
             ))
 
-            arrow_scale = 0.14 * max(Lx, Ly, Lz)
+            arrow_scale = 0.15 * max(Lx, Ly, Lz)
             dir_x = (f_x / mag) * arrow_scale
             dir_y = (f_y / mag) * arrow_scale
             dir_z = (f_z / mag) * arrow_scale
@@ -366,7 +368,7 @@ def build_domain_preview_figure(
                 y=[ly, ly + dir_y],
                 z=[lz, lz + dir_z],
                 mode="lines+markers",
-                line=dict(color="#ff0055", width=2),
+                line=dict(color="#ff0055", width=2.5),
                 marker=dict(size=[0, 4], color="#ff0055", symbol="diamond"),
                 text=[None, f"F = {mag:.1f} N"],
                 hoverinfo="text",
@@ -374,30 +376,33 @@ def build_domain_preview_figure(
                 showlegend=False
             ))
 
-    # 4. Topology Isosurface
+    # 4. Topology Mesh (Exact Watertight CAD Faces via Trimesh Extraction)
     if res is not None and view_mode == "result":
-        X, Y, Z = np.mgrid[0:Lx:complex(0, nelx),
-                           0:Ly:complex(0, nely),
-                           0:Lz:complex(0, nelz)]
-
-        fig.add_trace(go.Isosurface(
-            x=X.flatten(),
-            y=Y.flatten(),
-            z=Z.flatten(),
-            value=res.density_matrix.flatten(),
-            isomin=threshold,
-            isomax=1.0,
-            surface_count=2,
-            colorscale=[[0, '#38bdf8'], [1, '#ffffff']],
-            caps=dict(x_show=True, y_show=True, z_show=True),
-            colorbar=dict(
-                title=dict(text="ρ", font=dict(color="#ffffff", size=10, family="Inconsolata")),
-                tickfont=dict(color="#71717a", size=9, family="Inconsolata"),
-                len=0.55,
-                x=1.02
-            ),
-            name="Topology"
-        ))
+        tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
+        tmp_stl.close()
+        try:
+            res.export_stl(filepath=tmp_stl.name, threshold=threshold)
+            m = trimesh.load(tmp_stl.name)
+            if len(m.vertices) > 0 and len(m.faces) > 0:
+                fig.add_trace(go.Mesh3d(
+                    x=m.vertices[:, 0],
+                    y=m.vertices[:, 1],
+                    z=m.vertices[:, 2],
+                    i=m.faces[:, 0],
+                    j=m.faces[:, 1],
+                    k=m.faces[:, 2],
+                    color="#38bdf8",
+                    opacity=0.96,
+                    flatshading=True,
+                    lighting=dict(ambient=0.45, diffuse=0.8, specular=0.2),
+                    name="Topology",
+                    showlegend=False
+                ))
+        except Exception:
+            pass
+        finally:
+            if os.path.exists(tmp_stl.name):
+                os.remove(tmp_stl.name)
 
     # 5. Thermal Stress Heatmap (High-Contrast Gradient on Solid Voxels)
     if res is not None and view_mode == "stress" and res.stresses is not None:
@@ -427,9 +432,9 @@ def build_domain_preview_figure(
                     color=solid_vals,
                     colorscale=stress_colormap,
                     colorbar=dict(
-                        title=dict(text=f"{stress_field_name} (MPa)", font=dict(color="#ffffff", size=10, family="Inconsolata")),
-                        tickfont=dict(color="#71717a", size=9, family="Inconsolata"),
-                        len=0.55,
+                        title=dict(text=f"{stress_field_name} (MPa)", font=dict(color="#ffffff", size=9, family="Inconsolata")),
+                        tickfont=dict(color="#71717a", size=8, family="Inconsolata"),
+                        len=0.50,
                         x=1.02
                     ),
                     showscale=True,
@@ -438,7 +443,8 @@ def build_domain_preview_figure(
                 ),
                 text=hover_texts,
                 hoverinfo="text",
-                name=stress_field_name
+                name=stress_field_name,
+                showlegend=False
             ))
 
     # Plotly Layout: Pitch Black Background, Minimalist Grid
@@ -448,7 +454,7 @@ def build_domain_preview_figure(
         plot_bgcolor="#000000",
         scene=dict(
             xaxis=dict(
-                title=dict(text="X", font=dict(color="#71717a", size=10, family="Inconsolata")),
+                title=dict(text="X (mm)", font=dict(color="#71717a", size=10, family="Inconsolata")),
                 tickfont=dict(color="#52525b", size=8, family="Inconsolata"),
                 backgroundcolor="#000000",
                 gridcolor="#18181b",
@@ -456,7 +462,7 @@ def build_domain_preview_figure(
                 range=[-0.05 * Lx, 1.15 * Lx]
             ),
             yaxis=dict(
-                title=dict(text="Y", font=dict(color="#71717a", size=10, family="Inconsolata")),
+                title=dict(text="Y (mm)", font=dict(color="#71717a", size=10, family="Inconsolata")),
                 tickfont=dict(color="#52525b", size=8, family="Inconsolata"),
                 backgroundcolor="#000000",
                 gridcolor="#18181b",
@@ -464,7 +470,7 @@ def build_domain_preview_figure(
                 range=[-0.05 * Ly, 1.15 * Ly]
             ),
             zaxis=dict(
-                title=dict(text="Z", font=dict(color="#71717a", size=10, family="Inconsolata")),
+                title=dict(text="Z (mm)", font=dict(color="#71717a", size=10, family="Inconsolata")),
                 tickfont=dict(color="#52525b", size=8, family="Inconsolata"),
                 backgroundcolor="#000000",
                 gridcolor="#18181b",
@@ -473,12 +479,12 @@ def build_domain_preview_figure(
             ),
             aspectmode="data",
             camera=dict(
-                eye=dict(x=1.5, y=-1.7, z=1.1),
+                eye=dict(x=1.6, y=-1.8, z=1.2),
                 up=dict(x=0, y=0, z=1)
             )
         ),
         margin=dict(l=0, r=0, b=0, t=0),
-        height=580
+        height=500
     )
 
     return fig
@@ -488,7 +494,7 @@ def build_domain_preview_figure(
 # SIDEBAR CONTROLS
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown('<div style="font-size:1.1rem; font-weight:500; letter-spacing:0.18em; color:#ffffff; margin-bottom:1rem;">CE-3D</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:1.1rem; font-weight:500; letter-spacing:0.18em; color:#ffffff; margin-bottom:0.8rem;">CE-3D</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sec-head">1. Mesh & Dimensioni</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
@@ -575,31 +581,16 @@ with st.sidebar:
     solver_key = "pcg" if "PCG" in solver_opt else "direct"
 
     st.write("")
-    sidebar_run = st.button("RUN OPTIMIZATION", type="primary", use_container_width=True, key="btn_sidebar_run")
+    run_btn = st.button("RUN OPTIMIZATION", type="primary", use_container_width=True)
 
 
 # -----------------------------------------------------------------------------
-# MAIN HEADER & RUN TRIGGER
-# -----------------------------------------------------------------------------
-main_run = False
-if "res3d" not in st.session_state:
-    # Quick launch bar on top of the 3D viewport before solving
-    top_col1, top_col2 = st.columns([4, 1])
-    with top_col1:
-        st.markdown(f'<div style="font-size:0.85rem; color:#71717a; padding-top:0.4rem;">DOMINIO 3D: {Lx:.1f} × {Ly:.1f} × {Lz:.1f} mm | {nelx}×{nely}×{nelz} voxel</div>', unsafe_allow_html=True)
-    with top_col2:
-        main_run = st.button("OPTIMIZE", type="primary", use_container_width=True, key="btn_main_run")
-
-run_requested = sidebar_run or main_run
-
-
-# -----------------------------------------------------------------------------
-# SOLVER EXECUTION (HANDLED BEFORE VIEW RENDERING TO GUARANTEE RESULTS OPEN)
+# EXECUTION (RUNS ON BUTTON CLICK, THEN RENDERS RESULTS)
 # -----------------------------------------------------------------------------
 progress_holder = st.empty()
 status_holder = st.empty()
 
-if run_requested:
+if run_btn:
     progress_bar = progress_holder.progress(0)
     status_holder.text("Inizializzazione elementi H8...")
 
@@ -651,11 +642,12 @@ if run_requested:
 
     st.session_state["res3d"] = res
     st.session_state["opt3d"] = opt
+    progress_holder.empty()
     status_holder.text(f"Ottimizzazione completata in {res.iterations_run} iterazioni ({elapsed:.1f}s, RAM: {res.peak_memory_mb:.1f}MB)")
 
 
 # -----------------------------------------------------------------------------
-# VIEWPORT & RESULTS (IMMEDIATELY DISPLAYED WHEN RESULTS EXIST)
+# MAIN VIEWPORT: HEADER & TOOLBAR
 # -----------------------------------------------------------------------------
 has_result = ("res3d" in st.session_state and st.session_state["res3d"] is not None)
 
@@ -665,18 +657,22 @@ selected_stress_key = "von_mises"
 selected_stress_cmap = "Turbo"
 selected_stress_name = "Von Mises"
 
-if has_result:
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([3, 2, 1])
-    view_choice = ctrl_col1.radio(
-        "Visualizzazione:",
+if not has_result:
+    # Pure clean domain header
+    st.markdown(f'<div style="font-size:0.85rem; color:#71717a; margin-bottom:0.5rem; letter-spacing:0.05em;">DOMINIO 3D: {Lx:.1f} × {Ly:.1f} × {Lz:.1f} mm | {nelx}×{nely}×{nelz} elementi ({nelx*nely*nelz:,} voxel)</div>', unsafe_allow_html=True)
+else:
+    # Result toolbar
+    c_mode, c_thresh, c_reset = st.columns([3, 2, 1])
+    view_choice = c_mode.radio(
+        "Vista:",
         ["result", "stress", "preview"],
         index=0,
         format_func=lambda x: "Topologia" if x=="result" else ("Sforzi" if x=="stress" else "Dominio"),
         horizontal=True,
         label_visibility="collapsed"
     )
-    threshold_val = ctrl_col2.slider("Soglia densità", 0.10, 0.90, 0.35, 0.05, label_visibility="collapsed")
-    if ctrl_col3.button("RESET", use_container_width=True):
+    threshold_val = c_thresh.slider("Soglia densità", 0.10, 0.90, 0.35, 0.05, label_visibility="collapsed")
+    if c_reset.button("RESET", use_container_width=True):
         del st.session_state["res3d"]
         if "opt3d" in st.session_state:
             del st.session_state["opt3d"]
@@ -704,7 +700,7 @@ if has_result:
         selected_stress_key, selected_stress_name = key_map.get(stress_label, ("von_mises", "Von Mises"))
         selected_stress_cmap = sc2.selectbox("Colormap:", ["Turbo", "Jet", "Inferno", "Plasma", "Hot"], index=0)
 
-# Render 3D Domain immediately on startup or parameter update
+# Render 3D Domain Figure (Plotly ModeBar hidden for clean view)
 preview_fig = build_domain_preview_figure(
     nelx=nelx, nely=nely, nelz=nelz,
     dx=dx, dy=dy, dz=dz,
@@ -717,7 +713,7 @@ preview_fig = build_domain_preview_figure(
     stress_colormap=selected_stress_cmap,
     stress_field_name=selected_stress_name
 )
-st.plotly_chart(preview_fig, use_container_width=True)
+st.plotly_chart(preview_fig, use_container_width=True, config={"displayModeBar": False})
 
 
 # -----------------------------------------------------------------------------
@@ -769,7 +765,7 @@ if has_result:
                 yaxis=dict(gridcolor="#18181b", color="#52525b"),
                 yaxis2=dict(gridcolor="#18181b", color="#52525b")
             )
-            st.plotly_chart(fig_hist, use_container_width=True)
+            st.plotly_chart(fig_hist, use_container_width=True, config={"displayModeBar": False})
 
     with col_stl:
         st.markdown('<div class="sec-head">Export STL Watertight</div>', unsafe_allow_html=True)
