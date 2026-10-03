@@ -64,7 +64,7 @@ st.markdown("""
 
     /* Section Headers */
     .sec-head {
-        font-size: 0.85rem;
+        font-size: 0.82rem;
         font-weight: 500 !important;
         letter-spacing: 0.12em;
         text-transform: uppercase;
@@ -513,7 +513,10 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
+    sup_x, sup_y, sup_z = 0.0, 0.0, 0.0
+    fix_u, fix_v, fix_w = True, True, True
     custom_supports: List[Tuple[float, float, float, str]] = []
+
     if support_mode == "Incastro x=0":
         for j_idx in range(0, nely + 1, max(1, nely // 3)):
             for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
@@ -572,78 +575,31 @@ with st.sidebar:
     solver_key = "pcg" if "PCG" in solver_opt else "direct"
 
     st.write("")
-    run_btn = st.button("RUN OPTIMIZATION", type="primary", use_container_width=True)
+    sidebar_run = st.button("RUN OPTIMIZATION", type="primary", use_container_width=True, key="btn_sidebar_run")
 
 
 # -----------------------------------------------------------------------------
-# MAIN 3D VIEWPORT
+# MAIN HEADER & RUN TRIGGER
 # -----------------------------------------------------------------------------
-has_result = "res3d" in st.session_state and st.session_state["res3d"] is not None
+main_run = False
+if "res3d" not in st.session_state:
+    # Quick launch bar on top of the 3D viewport before solving
+    top_col1, top_col2 = st.columns([4, 1])
+    with top_col1:
+        st.markdown(f'<div style="font-size:0.85rem; color:#71717a; padding-top:0.4rem;">DOMINIO 3D: {Lx:.1f} × {Ly:.1f} × {Lz:.1f} mm | {nelx}×{nely}×{nelz} voxel</div>', unsafe_allow_html=True)
+    with top_col2:
+        main_run = st.button("OPTIMIZE", type="primary", use_container_width=True, key="btn_main_run")
 
-view_choice = "preview"
-threshold_val = 0.35
-selected_stress_key = "von_mises"
-selected_stress_cmap = "Turbo"
-selected_stress_name = "Von Mises"
+run_requested = sidebar_run or main_run
 
-if has_result:
-    ctrl_col1, ctrl_col2 = st.columns([3, 2])
-    view_choice = ctrl_col1.radio(
-        "Visualizzazione:",
-        ["result", "stress", "preview"],
-        index=0,
-        format_func=lambda x: "Topologia" if x=="result" else ("Sforzi" if x=="stress" else "Dominio"),
-        horizontal=True,
-        label_visibility="collapsed"
-    )
-    threshold_val = ctrl_col2.slider("Soglia densità", 0.10, 0.90, 0.35, 0.05)
 
-    if view_choice == "stress":
-        sc1, sc2 = st.columns(2)
-        stress_label = sc1.selectbox(
-            "Componente:",
-            [
-                "Von Mises",
-                "σ_III Minimo (Compressione)",
-                "σ_I Massimo (Trazione)",
-                "σ_xx", "σ_yy", "σ_zz"
-            ]
-        )
-        key_map = {
-            "Von Mises": ("von_mises", "Von Mises"),
-            "σ_III Minimo (Compressione)": ("sigma_III", "σ_III"),
-            "σ_I Massimo (Trazione)": ("sigma_I", "σ_I"),
-            "σ_xx": ("sigma_xx", "σ_xx"),
-            "σ_yy": ("sigma_yy", "σ_yy"),
-            "σ_zz": ("sigma_zz", "σ_zz")
-        }
-        selected_stress_key, selected_stress_name = key_map.get(stress_label, ("von_mises", "Von Mises"))
-        selected_stress_cmap = sc2.selectbox("Colormap:", ["Turbo", "Jet", "Inferno", "Plasma", "Hot"], index=0)
-
+# -----------------------------------------------------------------------------
+# SOLVER EXECUTION (HANDLED BEFORE VIEW RENDERING TO GUARANTEE RESULTS OPEN)
+# -----------------------------------------------------------------------------
 progress_holder = st.empty()
 status_holder = st.empty()
-preview_placeholder = st.empty()
 
-# Render 3D Domain immediately on startup or parameter update
-preview_fig = build_domain_preview_figure(
-    nelx=nelx, nely=nely, nelz=nelz,
-    dx=dx, dy=dy, dz=dz,
-    fixed_nodes_coords=custom_supports,
-    applied_loads=applied_loads,
-    res=st.session_state.get("res3d", None),
-    threshold=threshold_val,
-    view_mode=view_choice if has_result else "preview",
-    stress_field_key=selected_stress_key,
-    stress_colormap=selected_stress_cmap,
-    stress_field_name=selected_stress_name
-)
-preview_placeholder.plotly_chart(preview_fig, use_container_width=True)
-
-
-# -----------------------------------------------------------------------------
-# EXECUTION
-# -----------------------------------------------------------------------------
-if run_btn:
+if run_requested:
     progress_bar = progress_holder.progress(0)
     status_holder.text("Inizializzazione elementi H8...")
 
@@ -695,22 +651,73 @@ if run_btn:
 
     st.session_state["res3d"] = res
     st.session_state["opt3d"] = opt
+    status_holder.text(f"Ottimizzazione completata in {res.iterations_run} iterazioni ({elapsed:.1f}s, RAM: {res.peak_memory_mb:.1f}MB)")
 
-    status_holder.text(f"Convergenza completata in {res.iterations_run} iterazioni ({elapsed:.1f}s, RAM: {res.peak_memory_mb:.1f}MB)")
 
-    updated_fig = build_domain_preview_figure(
-        nelx=nelx, nely=nely, nelz=nelz,
-        dx=dx, dy=dy, dz=dz,
-        fixed_nodes_coords=custom_supports,
-        applied_loads=applied_loads,
-        res=res,
-        threshold=threshold_val,
-        view_mode="result",
-        stress_field_key=selected_stress_key,
-        stress_colormap=selected_stress_cmap,
-        stress_field_name=selected_stress_name
+# -----------------------------------------------------------------------------
+# VIEWPORT & RESULTS (IMMEDIATELY DISPLAYED WHEN RESULTS EXIST)
+# -----------------------------------------------------------------------------
+has_result = ("res3d" in st.session_state and st.session_state["res3d"] is not None)
+
+view_choice = "preview"
+threshold_val = 0.35
+selected_stress_key = "von_mises"
+selected_stress_cmap = "Turbo"
+selected_stress_name = "Von Mises"
+
+if has_result:
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([3, 2, 1])
+    view_choice = ctrl_col1.radio(
+        "Visualizzazione:",
+        ["result", "stress", "preview"],
+        index=0,
+        format_func=lambda x: "Topologia" if x=="result" else ("Sforzi" if x=="stress" else "Dominio"),
+        horizontal=True,
+        label_visibility="collapsed"
     )
-    preview_placeholder.plotly_chart(updated_fig, use_container_width=True)
+    threshold_val = ctrl_col2.slider("Soglia densità", 0.10, 0.90, 0.35, 0.05, label_visibility="collapsed")
+    if ctrl_col3.button("RESET", use_container_width=True):
+        del st.session_state["res3d"]
+        if "opt3d" in st.session_state:
+            del st.session_state["opt3d"]
+        st.rerun()
+
+    if view_choice == "stress":
+        sc1, sc2 = st.columns(2)
+        stress_label = sc1.selectbox(
+            "Componente Sforzo:",
+            [
+                "Von Mises",
+                "σ_III Minimo (Compressione)",
+                "σ_I Massimo (Trazione)",
+                "σ_xx", "σ_yy", "σ_zz"
+            ]
+        )
+        key_map = {
+            "Von Mises": ("von_mises", "Von Mises"),
+            "σ_III Minimo (Compressione)": ("sigma_III", "σ_III"),
+            "σ_I Massimo (Trazione)": ("sigma_I", "σ_I"),
+            "σ_xx": ("sigma_xx", "σ_xx"),
+            "σ_yy": ("sigma_yy", "σ_yy"),
+            "σ_zz": ("sigma_zz", "σ_zz")
+        }
+        selected_stress_key, selected_stress_name = key_map.get(stress_label, ("von_mises", "Von Mises"))
+        selected_stress_cmap = sc2.selectbox("Colormap:", ["Turbo", "Jet", "Inferno", "Plasma", "Hot"], index=0)
+
+# Render 3D Domain immediately on startup or parameter update
+preview_fig = build_domain_preview_figure(
+    nelx=nelx, nely=nely, nelz=nelz,
+    dx=dx, dy=dy, dz=dz,
+    fixed_nodes_coords=custom_supports,
+    applied_loads=applied_loads,
+    res=st.session_state.get("res3d", None),
+    threshold=threshold_val,
+    view_mode=view_choice if has_result else "preview",
+    stress_field_key=selected_stress_key,
+    stress_colormap=selected_stress_cmap,
+    stress_field_name=selected_stress_name
+)
+st.plotly_chart(preview_fig, use_container_width=True)
 
 
 # -----------------------------------------------------------------------------
