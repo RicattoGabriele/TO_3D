@@ -306,7 +306,7 @@ def build_domain_preview_figure(
                 z=[lz, lz + dir_z],
                 mode="lines+markers",
                 line=dict(color="#ff0055", width=6),
-                marker=dict(size=[0, 6], color="#ffffff", symbol="cone"),
+                marker=dict(size=[0, 8], color="#ff0055", symbol="diamond"),
                 text=[None, f"F = {mag:.1f} N"],
                 hoverinfo="text",
                 name=f"Load #{idx+1} Vector"
