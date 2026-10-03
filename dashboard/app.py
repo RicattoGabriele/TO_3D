@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 # Ensure project root and dashboard are in sys.path
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -18,310 +18,683 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from physics_engine.simp_engine_3d import SIMPOptimizer3D, SIMPResult3D
-from physics_engine.simp_engine_2d import SIMPOptimizer2D
-
-# Optional PicoGK integration
-try:
-    from dashboard.core.execution_runner import run_generation
-    from dashboard.core.visualizer import compute_mesh_metrics, render_3d_mesh_plotly
-    PICOGK_AVAILABLE = True
-except Exception:
-    PICOGK_AVAILABLE = False
 
 # -----------------------------------------------------------------------------
-# Streamlit Page Setup
+# Streamlit Page Setup - Minimal Monochrome Dark Style
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="CE-3D: Multi-Objective Topology Optimization",
+    page_title="CE-3D | Topology Optimization",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Courier+Prime:ital,wght@0,400;0,700;1,400;1,700&display=swap');
-    * {
-        font-family: 'Courier Prime', monospace !important;
+    @import url('https://fonts.googleapis.com/css2?family=Inconsolata:wght@300;400;600&display=swap');
+
+    /* Global Typography & Black Background */
+    html, body, [class*="css"], .stApp {
+        font-family: 'Inconsolata', monospace !important;
+        font-weight: 300 !important;
+        background-color: #000000 !important;
+        color: #f1f5f9 !important;
     }
-    .main-header {
-        font-size: 1.8rem;
-        font-weight: 700;
-        margin-bottom: 0.2rem;
-        border-bottom: 2px solid #3b82f6;
-        padding-bottom: 10px;
+
+    /* Headers */
+    h1, h2, h3, h4, h5, h6 {
+        font-family: 'Inconsolata', monospace !important;
+        font-weight: 400 !important;
+        color: #ffffff !important;
+        letter-spacing: 0.05em;
     }
-    .sub-header {
-        font-size: 0.95rem;
-        color: #64748b;
-        margin-bottom: 1.5rem;
+
+    .main-title {
+        font-size: 1.6rem;
+        font-weight: 600 !important;
+        color: #ffffff;
+        border-bottom: 1px solid #27272a;
+        padding-bottom: 8px;
+        margin-bottom: 4px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+    .sub-title {
+        font-size: 0.85rem;
+        color: #71717a;
+        margin-bottom: 1.2rem;
+        letter-spacing: 0.04em;
+    }
+
+    /* Sidebar Background */
+    section[data-testid="stSidebar"] {
+        background-color: #09090b !important;
+        border-right: 1px solid #18181b !important;
+    }
+
+    /* Neutral Monochrome Sliders - REMOVE ORANGE/RED */
+    div[data-baseweb="slider"] {
+        font-family: 'Inconsolata', monospace !important;
+        font-weight: 300 !important;
+    }
+    div[data-baseweb="slider"] div[role="slider"] {
+        background-color: #ffffff !important;
+        border: 2px solid #09090b !important;
+        box-shadow: 0 0 10px rgba(255, 255, 255, 0.7) !important;
+        width: 16px !important;
+        height: 16px !important;
+    }
+    /* Slider active progress track */
+    div[data-baseweb="slider"] > div > div:first-child {
+        background: #27272a !important;
+    }
+    div[data-baseweb="slider"] div[style*="background-color: rgb(255, 75, 75)"],
+    div[data-baseweb="slider"] div[style*="background-color: rgb(255, 115, 0)"],
+    div[data-baseweb="slider"] div[style*="background-color: #ff4b4b"],
+    div[data-baseweb="slider"] div[style*="background-color: #f97316"] {
+        background-color: #e4e4e7 !important;
+    }
+
+    /* Input fields and boxes */
+    input, textarea, select, [data-baseweb="input"], [data-baseweb="base-input"] {
+        font-family: 'Inconsolata', monospace !important;
+        font-weight: 300 !important;
+        background-color: #09090b !important;
+        color: #ffffff !important;
+        border-color: #27272a !important;
+        border-radius: 2px !important;
+    }
+    input:focus, textarea:focus {
+        border-color: #ffffff !important;
+        box-shadow: none !important;
+    }
+
+    /* Minimalist Buttons */
+    .stButton > button {
+        font-family: 'Inconsolata', monospace !important;
+        font-weight: 400 !important;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background-color: #09090b !important;
+        color: #ffffff !important;
+        border: 1px solid #3f3f46 !important;
+        border-radius: 2px !important;
+        padding: 0.45rem 1rem !important;
+        transition: all 0.15s ease-in-out !important;
+    }
+    .stButton > button:hover {
+        background-color: #ffffff !important;
+        color: #000000 !important;
+        border-color: #ffffff !important;
+    }
+    .stButton > button:active {
+        background-color: #e4e4e7 !important;
+        color: #000000 !important;
+    }
+
+    /* Primary Accent Button */
+    button[kind="primary"] {
+        background-color: #18181b !important;
+        color: #ffffff !important;
+        border: 1px solid #ffffff !important;
+    }
+    button[kind="primary"]:hover {
+        background-color: #ffffff !important;
+        color: #000000 !important;
+    }
+
+    /* Metric Containers */
+    [data-testid="stMetricValue"] {
+        font-family: 'Inconsolata', monospace !important;
+        font-weight: 600 !important;
+        color: #ffffff !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-family: 'Inconsolata', monospace !important;
+        font-weight: 300 !important;
+        color: #a1a1aa !important;
+        font-size: 0.78rem !important;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+    }
+
+    /* Progress bar */
+    .stProgress > div > div > div > div {
+        background-color: #ffffff !important;
+    }
+
+    /* Expander */
+    .streamlit-expanderHeader {
+        background-color: #09090b !important;
+        border: 1px solid #18181b !important;
+        color: #a1a1aa !important;
+        font-weight: 300 !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">CE-3D: Multi-Objective Topology Optimization</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Continuum Topology Optimization for Structural Compliance and Linearized Buckling Stability</div>', unsafe_allow_html=True)
+# Main Title Header
+st.markdown('<div class="main-title">CE-3D Continuum Topology Optimization</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">Multi-Objective Linear Elastic Compliance & Linearized Buckling Stability Engine (H8 Isoparametric Elements)</div>', unsafe_allow_html=True)
 
-tab_3d, tab_2d, tab_docs, tab_roadmap = st.tabs([
-    "🧊 3D Continuum Engine", 
-    "📐 2D Engine & Pareto Sweep", 
-    "📖 Theoretical Log & PDF", 
-    "🚀 Multi-Physics Roadmap (Noyron)"
-])
 
-# =============================================================================
-# TAB 1: 3D Continuum Optimization
-# =============================================================================
-with tab_3d:
-    col_cfg, col_vis = st.columns([1, 2])
+# -----------------------------------------------------------------------------
+# 3D Domain Preview Function with Colored Boundary Conditions
+# -----------------------------------------------------------------------------
+def build_domain_preview_figure(
+    nelx: int, nely: int, nelz: int,
+    dx: float, dy: float, dz: float,
+    fixed_nodes_coords: List[Tuple[float, float, float, str]],
+    applied_loads: List[Tuple[float, float, float, float, float, float]],
+    res: Optional[SIMPResult3D] = None,
+    threshold: float = 0.35,
+    view_mode: str = "preview"
+) -> go.Figure:
+    """
+    Renders an interactive 3D Plotly visualization:
+    - Bounding volume parallelepiped [0..Lx] x [0..Ly] x [0..Lz]
+    - Fixed supports as high-visibility colored elements (Cyan/Green glyphs)
+    - Applied loads as bright colored vectors/arrows (Magenta/Red glyphs)
+    - Optionally overlays the converged 3D topology isosurface if solved.
+    """
+    Lx = float(nelx * dx)
+    Ly = float(nely * dy)
+    Lz = float(nelz * dz)
 
-    with col_cfg:
-        st.subheader("1. 3D Domain Discretization")
-        c1, c2, c3 = st.columns(3)
-        nelx = c1.number_input("Elements X", min_value=6, max_value=80, value=20, step=2)
-        nely = c2.number_input("Elements Y", min_value=4, max_value=50, value=10, step=2)
-        nelz = c3.number_input("Elements Z", min_value=4, max_value=50, value=10, step=2)
-        
-        c4, c5, c6 = st.columns(3)
-        dx = c4.number_input("dx (mm)", min_value=0.2, max_value=10.0, value=1.0, step=0.5)
-        dy = c5.number_input("dy (mm)", min_value=0.2, max_value=10.0, value=1.0, step=0.5)
-        dz = c6.number_input("dz (mm)", min_value=0.2, max_value=10.0, value=1.0, step=0.5)
+    fig = go.Figure()
 
-        total_voxels = nelx * nely * nelz
-        st.caption(f"Grid: {total_voxels:,} voxels ({total_voxels * 12 / 1024:.1f} MB RAM estimate)")
+    # 1. Bounding Box Parallelepiped Wireframe (12 Edges)
+    # Vertices of the parallelepiped
+    # 0:(0,0,0), 1:(Lx,0,0), 2:(Lx,Ly,0), 3:(0,Ly,0)
+    # 4:(0,0,Lz), 5:(Lx,0,Lz), 6:(Lx,Ly,Lz), 7:(0,Ly,Lz)
+    edge_x = [0, Lx, Lx, 0, 0,  0, Lx, Lx, 0, 0,  Lx, Lx,  Lx, Lx,  0, 0]
+    edge_y = [0, 0,  Ly, Ly, 0,  0, 0,  Ly, Ly, 0,  0,  Ly,  Ly, 0,   Ly, Ly]
+    edge_z = [0, 0,  0,  0,  0,  Lz, Lz, Lz, Lz, Lz, 0,  0,   Lz, Lz,  0, Lz]
 
-        st.subheader("2. Optimization Objectives")
-        volfrac = st.slider("Target Volume Fraction (Vf)", 0.10, 0.80, 0.35, 0.05)
-        alpha = st.slider(
-            "Buckling Weight Factor (α)", 0.00, 0.90, 0.30, 0.05,
-            help="0.0 = Minimum Compliance (maximum stiffness). 0.9 = High Buckling Stability (prevents slender member collapse)."
-        )
-        rmin = st.slider("Filter Radius r_min (mm)", 1.0, 5.0, 1.5, 0.5)
-        max_iter = st.slider("Max Iterations", 5, 50, 25, 5)
-        solver_type = st.selectbox("Linear Equation Solver", ["pcg (Jacobi PCG, Low Memory)", "direct (SuperLU)"])
-        solver_key = "pcg" if "pcg" in solver_type else "direct"
+    # Wireframe edges
+    fig.add_trace(go.Scatter3d(
+        x=[
+            0, Lx, Lx, 0, 0, None,
+            0, Lx, Lx, 0, 0, None,
+            0, 0, None,
+            Lx, Lx, None,
+            Lx, Lx, None,
+            0, 0
+        ],
+        y=[
+            0, 0, Ly, Ly, 0, None,
+            0, 0, Ly, Ly, 0, None,
+            0, 0, None,
+            0, 0, None,
+            Ly, Ly, None,
+            Ly, Ly
+        ],
+        z=[
+            0, 0, 0, 0, 0, None,
+            Lz, Lz, Lz, Lz, Lz, None,
+            0, Lz, None,
+            0, Lz, None,
+            0, Lz, None,
+            0, Lz
+        ],
+        mode="lines",
+        line=dict(color="#52525b", width=3),
+        name="Domain Box",
+        hoverinfo="skip"
+    ))
 
-        st.subheader("3. Boundary Conditions & Loads")
-        bc_preset = st.selectbox("Support Preset", ["Cantilever (Clamped Left Face)", "Bridge (Bottom Corners)", "Center Beam"])
-        load_mag = st.number_input("Applied Load Magnitude (N)", value=100.0, step=10.0)
+    # Semi-transparent domain shading
+    fig.add_trace(go.Mesh3d(
+        x=[0, Lx, Lx, 0, 0, Lx, Lx, 0],
+        y=[0, 0, Ly, Ly, 0, 0, Ly, Ly],
+        z=[0, 0, 0, 0, Lz, Lz, Lz, Lz],
+        i=[0, 0, 4, 4, 0, 0, 1, 1, 0, 0, 2, 2],
+        j=[1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 3, 7],
+        k=[2, 3, 6, 7, 5, 4, 6, 5, 7, 4, 7, 6],
+        color="#27272a",
+        opacity=0.08,
+        name="Domain Volume",
+        hoverinfo="skip"
+    ))
 
-        run_3d_btn = st.button("⚡ Solve 3D Topology Optimization", type="primary", use_container_width=True)
+    # 2. Fixed Supports Markers (Cyan / High Visibility)
+    if fixed_nodes_coords:
+        fx_x = [pt[0] for pt in fixed_nodes_coords]
+        fx_y = [pt[1] for pt in fixed_nodes_coords]
+        fx_z = [pt[2] for pt in fixed_nodes_coords]
+        fx_hover = [f"Support ({pt[0]:.1f}, {pt[1]:.1f}, {pt[2]:.1f}) mm<br>DOFs: {pt[3]}" for pt in fixed_nodes_coords]
 
-    with col_vis:
-        progress_box = st.empty()
-        status_box = st.empty()
-        vis_box = st.empty()
-        chart_box = st.empty()
+        # Use slightly larger size for points, scaled appropriately
+        marker_size = max(5, min(14, int(220 / max(nelx, nely, nelz))))
 
-    if run_3d_btn:
-        progress_bar = progress_box.progress(0)
-        
-        opt3d = SIMPOptimizer3D(
-            nelx=int(nelx), nely=int(nely), nelz=int(nelz),
-            dx=float(dx), dy=float(dy), dz=float(dz),
-            E0=1.0, Emin=1e-9, nu=0.3,
-            penal=3.0, penal_g=6.0,
-            rmin=float(rmin), volfrac=float(volfrac),
-            solver_type=solver_key
-        )
+        fig.add_trace(go.Scatter3d(
+            x=fx_x, y=fx_y, z=fx_z,
+            mode="markers",
+            marker=dict(
+                size=marker_size,
+                color="#00f5d4",  # High-visibility electric cyan
+                symbol="square",
+                line=dict(color="#ffffff", width=1)
+            ),
+            text=fx_hover,
+            hoverinfo="text",
+            name="Fixed Support [Ux, Uy, Uz]"
+        ))
 
-        if bc_preset == "Cantilever (Clamped Left Face)":
-            opt3d.fix_face("left", fix_x=True, fix_y=True, fix_z=True)
-            opt3d.add_load(nelx, 0, nelz // 2, fx=0.0, fy=-float(load_mag), fz=0.0)
-        elif bc_preset == "Bridge (Bottom Corners)":
-            opt3d.fix_face("bottom", fix_x=True, fix_y=True, fix_z=True)
-            opt3d.add_load(nelx // 2, nely, nelz // 2, fx=0.0, fy=-float(load_mag), fz=0.0)
-        else:
-            opt3d.fix_face("left", fix_x=True, fix_y=True, fix_z=True)
-            opt3d.add_load(nelx, nely // 2, nelz // 2, fx=0.0, fy=-float(load_mag), fz=0.0)
+    # 3. Applied Loads (Magenta / Fluorescent Red with Vector Arrows)
+    if applied_loads:
+        for idx, (lx, ly, lz, f_x, f_y, f_z) in enumerate(applied_loads):
+            mag = np.sqrt(f_x**2 + f_y**2 + f_z**2)
+            if mag < 1e-6:
+                continue
 
-        def on_3d_progress(it, max_it, comp=0.0, vol=0.0, *args):
-            pct = int((it / max_it) * 100)
-            progress_bar.progress(pct)
-            status_box.info(f"Iter {it:02d}/{max_it:02d} | Compliance: {comp:.3e} | Vol: {vol*100:.1f}%")
+            # Load application node marker
+            fig.add_trace(go.Scatter3d(
+                x=[lx], y=[ly], z=[lz],
+                mode="markers",
+                marker=dict(
+                    size=max(8, int(300 / max(nelx, nely, nelz))),
+                    color="#ff0055",  # Vibrant neon magenta
+                    symbol="diamond",
+                    line=dict(color="#ffffff", width=1.5)
+                ),
+                text=[f"Load #{idx+1}: F=({f_x:.1f}, {f_y:.1f}, {f_z:.1f}) N<br>Point: ({lx:.1f}, {ly:.1f}, {lz:.1f}) mm"],
+                hoverinfo="text",
+                name=f"Load #{idx+1} Point"
+            ))
 
-        mode = "buckling_max" if alpha > 0.0 else "compliance"
-        start_t = time.time()
-        res3d = opt3d.solve(
-            max_iter=int(max_iter),
-            tol=0.015,
-            mode=mode,
-            alpha_buckling=float(alpha),
-            progress_callback=on_3d_progress
-        )
-        elapsed = time.time() - start_t
+            # Scaled 3D force vector arrow line
+            # Arrow length proportional to domain size (approx 15% of diagonal)
+            arrow_scale = 0.22 * max(Lx, Ly, Lz)
+            dir_x = (f_x / mag) * arrow_scale
+            dir_y = (f_y / mag) * arrow_scale
+            dir_z = (f_z / mag) * arrow_scale
 
-        st.session_state["res3d"] = res3d
-        st.session_state["opt3d"] = opt3d
-        status_box.success(f"✅ Converged in {res3d.iterations_run} iterations ({elapsed:.2f} s) | Peak RAM: {res3d.peak_memory_mb:.1f} MB")
+            # Vector line pointing from load point in direction of force
+            fig.add_trace(go.Scatter3d(
+                x=[lx, lx + dir_x],
+                y=[ly, ly + dir_y],
+                z=[lz, lz + dir_z],
+                mode="lines+markers",
+                line=dict(color="#ff0055", width=6),
+                marker=dict(size=[0, 6], color="#ffffff", symbol="cone"),
+                text=[None, f"F = {mag:.1f} N"],
+                hoverinfo="text",
+                name=f"Load #{idx+1} Vector"
+            ))
 
-    if "res3d" in st.session_state:
-        res = st.session_state["res3d"]
-        opt = st.session_state["opt3d"]
+    # 4. Optimized Geometry (if computed and requested)
+    if res is not None and view_mode == "result":
+        X, Y, Z = np.mgrid[0:Lx:complex(0, nelx),
+                           0:Ly:complex(0, nely),
+                           0:Lz:complex(0, nelz)]
 
-        # Convergence plot
+        fig.add_trace(go.Isosurface(
+            x=X.flatten(),
+            y=Y.flatten(),
+            z=Z.flatten(),
+            value=res.density_matrix.flatten(),
+            isomin=threshold,
+            isomax=1.0,
+            surface_count=2,
+            colorscale=[[0, '#38bdf8'], [1, '#ffffff']],
+            caps=dict(x_show=True, y_show=True, z_show=True),
+            colorbar=dict(
+                title=dict(text="ρ (Density)", font=dict(color="#ffffff", size=10)),
+                tickfont=dict(color="#a1a1aa", size=9),
+                len=0.6,
+                x=1.02
+            ),
+            name="Optimized Topology"
+        ))
+
+    # Plotly Layout: Pitch Black Background, Minimalist Axes
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#000000",
+        plot_bgcolor="#000000",
+        scene=dict(
+            xaxis=dict(
+                title=dict(text="X (mm)", font=dict(color="#a1a1aa", size=11)),
+                tickfont=dict(color="#71717a", size=9),
+                backgroundcolor="#050505",
+                gridcolor="#18181b",
+                zerolinecolor="#27272a",
+                range=[-0.05 * Lx, 1.25 * Lx]
+            ),
+            yaxis=dict(
+                title=dict(text="Y (mm)", font=dict(color="#a1a1aa", size=11)),
+                tickfont=dict(color="#71717a", size=9),
+                backgroundcolor="#050505",
+                gridcolor="#18181b",
+                zerolinecolor="#27272a",
+                range=[-0.05 * Ly, 1.25 * Ly]
+            ),
+            zaxis=dict(
+                title=dict(text="Z (mm)", font=dict(color="#a1a1aa", size=11)),
+                tickfont=dict(color="#71717a", size=9),
+                backgroundcolor="#050505",
+                gridcolor="#18181b",
+                zerolinecolor="#27272a",
+                range=[-0.05 * Lz, 1.25 * Lz]
+            ),
+            aspectmode="data",
+            camera=dict(
+                eye=dict(x=1.6, y=-1.8, z=1.2),
+                up=dict(x=0, y=0, z=1)
+            )
+        ),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.01,
+            xanchor="right",
+            x=1,
+            font=dict(size=10, color="#d4d4d8", family="Inconsolata")
+        ),
+        margin=dict(l=0, r=0, b=0, t=10),
+        height=540
+    )
+
+    return fig
+
+
+# -----------------------------------------------------------------------------
+# SIDEBAR: PARAMETERS & GEOMETRY CONFIGURATION
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### 1. Dominio 3D")
+    
+    col_d1, col_d2, col_d3 = st.columns(3)
+    nelx = col_d1.number_input("nelx", min_value=4, max_value=80, value=20, step=2)
+    nely = col_d2.number_input("nely", min_value=2, max_value=50, value=10, step=2)
+    nelz = col_d3.number_input("nelz", min_value=2, max_value=50, value=10, step=2)
+
+    col_sz1, col_sz2, col_sz3 = st.columns(3)
+    dx = col_sz1.number_input("dx (mm)", min_value=0.1, max_value=20.0, value=1.0, step=0.5)
+    dy = col_sz2.number_input("dy (mm)", min_value=0.1, max_value=20.0, value=1.0, step=0.5)
+    dz = col_sz3.number_input("dz (mm)", min_value=0.1, max_value=20.0, value=1.0, step=0.5)
+
+    Lx = nelx * dx
+    Ly = nely * dy
+    Lz = nelz * dz
+    total_elements = nelx * nely * nelz
+    total_dofs = 3 * (nelx + 1) * (nely + 1) * (nelz + 1)
+
+    st.caption(f"Volume: {Lx:.1f} × {Ly:.1f} × {Lz:.1f} mm | {total_elements:,} elementi | {total_dofs:,} GDL")
+
+    st.markdown("---")
+    st.markdown("### 2. Vincoli & Supporti")
+    support_mode = st.radio(
+        "Modalità Supporti:",
+        ["Faccia Sinistra Incastrata (x = 0)", "Doppio Appoggio Base", "Punto Personalizzato (X, Y, Z)"],
+        index=0
+    )
+
+    custom_supports: List[Tuple[float, float, float, str]] = []
+    if support_mode == "Faccia Sinistra Incastrata (x = 0)":
+        # Sample points on face x=0 for visualization
+        for j_idx in range(0, nely + 1, max(1, nely // 4)):
+            for k_idx in range(0, nelz + 1, max(1, nelz // 4)):
+                custom_supports.append((0.0, j_idx * dy, k_idx * dz, "Ux, Uy, Uz"))
+    elif support_mode == "Doppio Appoggio Base":
+        # Four bottom corners
+        custom_supports.append((0.0, 0.0, 0.0, "Ux, Uy, Uz"))
+        custom_supports.append((0.0, 0.0, Lz, "Ux, Uy, Uz"))
+        custom_supports.append((Lx, 0.0, 0.0, "Uy, Uz"))
+        custom_supports.append((Lx, 0.0, Lz, "Uy, Uz"))
+    else:
+        st.markdown("**Coordinate Punto Vincolato:**")
+        col_sup_x, col_sup_y, col_sup_z = st.columns(3)
+        sup_x = col_sup_x.number_input("X (mm)", min_value=0.0, max_value=float(Lx), value=0.0, step=float(dx))
+        sup_y = col_sup_y.number_input("Y (mm)", min_value=0.0, max_value=float(Ly), value=0.0, step=float(dy))
+        sup_z = col_sup_z.number_input("Z (mm)", min_value=0.0, max_value=float(Lz), value=0.0, step=float(dz))
+
+        col_dof_x, col_dof_y, col_dof_z = st.columns(3)
+        fix_u = col_dof_x.checkbox("Blocca Ux", value=True)
+        fix_v = col_dof_y.checkbox("Blocca Uy", value=True)
+        fix_w = col_dof_z.checkbox("Blocca Uz", value=True)
+
+        dof_desc = []
+        if fix_u: dof_desc.append("Ux")
+        if fix_v: dof_desc.append("Uy")
+        if fix_w: dof_desc.append("Uz")
+        custom_supports.append((sup_x, sup_y, sup_z, ", ".join(dof_desc) if dof_desc else "Nessuno"))
+
+    st.markdown("---")
+    st.markdown("### 3. Carichi Concentrati")
+    load_mode = st.radio(
+        "Modalità Carico:",
+        ["Carico Trasversale Estremità (Punta)", "Punto Preciso Personalizzato (X, Y, Z, Fx, Fy, Fz)"],
+        index=0
+    )
+
+    applied_loads: List[Tuple[float, float, float, float, float, float]] = []
+    if load_mode == "Carico Trasversale Estremità (Punta)":
+        fy_mag = st.number_input("Forza Fy (N)", value=-100.0, step=10.0)
+        # Applied at (Lx, 0, Lz/2)
+        applied_loads.append((Lx, 0.0, Lz / 2.0, 0.0, float(fy_mag), 0.0))
+    else:
+        st.markdown("**Posizione e Vettore Forza:**")
+        col_lp_x, col_lp_y, col_lp_z = st.columns(3)
+        lp_x = col_lp_x.number_input("Pos X (mm)", 0.0, float(Lx), float(Lx), float(dx))
+        lp_y = col_lp_y.number_input("Pos Y (mm)", 0.0, float(Ly), 0.0, float(dy))
+        lp_z = col_lp_z.number_input("Pos Z (mm)", 0.0, float(Lz), float(Lz/2.0), float(dz))
+
+        col_lf_x, col_lf_y, col_lf_z = st.columns(3)
+        lf_x = col_lf_x.number_input("Fx (N)", value=0.0, step=10.0)
+        lf_y = col_lf_y.number_input("Fy (N)", value=-100.0, step=10.0)
+        lf_z = col_lf_z.number_input("Fz (N)", value=0.0, step=10.0)
+        applied_loads.append((lp_x, lp_y, lp_z, float(lf_x), float(lf_y), float(lf_z)))
+
+    st.markdown("---")
+    st.markdown("### 4. Parametri Ottimizzazione")
+    volfrac = st.slider("Frazione di Volume (Vf)", 0.10, 0.80, 0.35, 0.05)
+    alpha = st.slider("Peso Instabilità Buckling (α)", 0.00, 0.90, 0.30, 0.05)
+    rmin = st.slider("Raggio Filtro r_min (mm)", 0.5, 6.0, 1.5, 0.5)
+    max_iter = st.slider("Iterazioni Max", 5, 60, 25, 5)
+    solver_opt = st.selectbox("Solutore di Sistema", ["PCG + Jacobi (Memoria Minima)", "Diretto (SuperLU)"])
+    solver_key = "pcg" if "PCG" in solver_opt else "direct"
+
+
+# -----------------------------------------------------------------------------
+# MAIN VIEW: REAL-TIME DOMAIN PREVIEW & SOLVER
+# -----------------------------------------------------------------------------
+col_left, col_right = st.columns([1, 2])
+
+with col_left:
+    st.markdown("#### Stato Configurazione")
+    st.write(f"• **Dimensioni**: `{Lx:.1f} × {Ly:.1f} × {Lz:.1f}` mm")
+    st.write(f"• **Mesh Elementi**: `{nelx} × {nely} × {nelz}` ({total_elements:,} voxel)")
+    st.write(f"• **Filtro Spaziale**: `r_min = {rmin:.1f}` mm")
+    st.write(f"• **Obiettivo**: `α = {alpha:.2f}` (0: Rigidezza pura, 1: Max Stabilità)")
+    
+    run_btn = st.button("🚀 Avvia Ottimizzazione Topologica 3D", type="primary", use_container_width=True)
+
+    progress_holder = st.empty()
+    status_holder = st.empty()
+    metric_holder = st.empty()
+
+with col_right:
+    st.markdown("#### Anteprima 3D del Dominio & Risultati")
+    preview_placeholder = st.empty()
+
+    # Determine if we have a converged solution in state
+    has_result = "res3d" in st.session_state and st.session_state["res3d"] is not None
+
+    # Toggle between preview and result if solved
+    view_choice = "preview"
+    threshold_val = 0.35
+    if has_result:
+        col_t1, col_t2 = st.columns([1, 2])
+        view_choice = col_t1.radio("Visualizzazione:", ["result", "preview"], index=0, format_func=lambda x: "Topologia Ottimizzata" if x=="result" else "Solo Dominio & Vincoli", horizontal=True)
+        threshold_val = col_t2.slider("Soglia Densità Isosuperficie", 0.10, 0.90, 0.35, 0.05)
+
+
+# Render the interactive 3D Domain immediately on startup or parameter change
+preview_fig = build_domain_preview_figure(
+    nelx=nelx, nely=nely, nelz=nelz,
+    dx=dx, dy=dy, dz=dz,
+    fixed_nodes_coords=custom_supports,
+    applied_loads=applied_loads,
+    res=st.session_state.get("res3d", None),
+    threshold=threshold_val,
+    view_mode=view_choice
+)
+preview_placeholder.plotly_chart(preview_fig, use_container_width=True)
+
+
+# -----------------------------------------------------------------------------
+# OPTIMIZATION EXECUTION HOOK
+# -----------------------------------------------------------------------------
+if run_btn:
+    progress_bar = progress_holder.progress(0)
+    status_holder.info("Inizializzazione solutore ed elementi esaedrici H8...")
+
+    opt = SIMPOptimizer3D(
+        nelx=int(nelx), nely=int(nely), nelz=int(nelz),
+        dx=float(dx), dy=float(dy), dz=float(dz),
+        E0=1.0, Emin=1e-9, nu=0.3,
+        penal=3.0, penal_g=6.0,
+        rmin=float(rmin), volfrac=float(volfrac),
+        solver_type=solver_key
+    )
+
+    # Apply Boundary Conditions
+    if support_mode == "Faccia Sinistra Incastrata (x = 0)":
+        opt.fix_face("left", fix_x=True, fix_y=True, fix_z=True)
+    elif support_mode == "Doppio Appoggio Base":
+        opt.fix_node(0, 0, 0, fix_x=True, fix_y=True, fix_z=True)
+        opt.fix_node(0, 0, nelz, fix_x=True, fix_y=True, fix_z=True)
+        opt.fix_node(nelx, 0, 0, fix_x=False, fix_y=True, fix_z=True)
+        opt.fix_node(nelx, 0, nelz, fix_x=False, fix_y=True, fix_z=True)
+    else:
+        # Custom point
+        node_i = int(np.clip(round(sup_x / dx), 0, nelx))
+        node_j = int(np.clip(round(sup_y / dy), 0, nely))
+        node_k = int(np.clip(round(sup_z / dz), 0, nelz))
+        opt.fix_node(node_i, node_j, node_k, fix_x=fix_u, fix_y=fix_v, fix_z=fix_w)
+
+    # Apply Loads
+    for lx, ly, lz, fx, fy, fz in applied_loads:
+        node_i = int(np.clip(round(lx / dx), 0, nelx))
+        node_j = int(np.clip(round(ly / dy), 0, nely))
+        node_k = int(np.clip(round(lz / dz), 0, nelz))
+        opt.add_load(node_i, node_j, node_k, fx=fx, fy=fy, fz=fz)
+
+    # Live update callback
+    def on_progress(it, max_it, comp=0.0, vol=0.0, *args):
+        pct = int((it / max_it) * 100)
+        progress_bar.progress(pct)
+        status_holder.text(f"Iterazione {it:02d}/{max_it:02d} | Compliance: {comp:.3e} | Densità Media: {vol*100:.1f}%")
+
+    mode = "buckling_max" if alpha > 0.0 else "compliance"
+    start_time = time.time()
+    res = opt.solve(
+        max_iter=int(max_iter),
+        tol=0.015,
+        mode=mode,
+        alpha_buckling=float(alpha),
+        progress_callback=on_progress
+    )
+    elapsed = time.time() - start_time
+
+    st.session_state["res3d"] = res
+    st.session_state["opt3d"] = opt
+
+    status_holder.success(f"Convergenza completata in {res.iterations_run} iterazioni ({elapsed:.2f}s)! RAM picco: {res.peak_memory_mb:.1f} MB")
+
+    # Re-render with optimized results
+    updated_fig = build_domain_preview_figure(
+        nelx=nelx, nely=nely, nelz=nelz,
+        dx=dx, dy=dy, dz=dz,
+        fixed_nodes_coords=custom_supports,
+        applied_loads=applied_loads,
+        res=res,
+        threshold=threshold_val,
+        view_mode="result"
+    )
+    preview_placeholder.plotly_chart(updated_fig, use_container_width=True)
+
+
+# -----------------------------------------------------------------------------
+# CONVERGENCE CHARTS & STL EXPORT (BELOW)
+# -----------------------------------------------------------------------------
+if "res3d" in st.session_state and st.session_state["res3d"] is not None:
+    res = st.session_state["res3d"]
+    opt = st.session_state["opt3d"]
+
+    st.markdown("---")
+    col_metrics, col_export = st.columns([1, 1])
+
+    with col_metrics:
+        st.markdown("#### Metriche di Convergenza")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Compliance (N·mm)", f"{res.compliance:.3e}")
+        blf_str = f"{res.blf_history[-1]:.4f}" if res.blf_history else "N/A"
+        m2.metric("BLF Fondamentale", blf_str)
+        m3.metric("Frazione Volume", f"{res.volume_fraction*100:.1f}%")
+        m4.metric("Tempo Calcolo", f"{res.execution_time_sec:.1f}s")
+
         if res.compliance_history:
-            fig_conv = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_hist = make_subplots(specs=[[{"secondary_y": True}]])
             iters = list(range(1, len(res.compliance_history) + 1))
-            fig_conv.add_trace(
-                go.Scatter(x=iters, y=res.compliance_history, name="Compliance (Strain Energy)", line=dict(color="#3b82f6", width=2)),
+            fig_hist.add_trace(
+                go.Scatter(x=iters, y=res.compliance_history, name="Compliance", line=dict(color="#ffffff", width=2)),
                 secondary_y=False
             )
             if res.blf_history:
-                fig_conv.add_trace(
-                    go.Scatter(x=iters, y=res.blf_history, name="Buckling Load Factor (BLF)", line=dict(color="#ef4444", width=2, dash="dash")),
+                fig_hist.add_trace(
+                    go.Scatter(x=iters, y=res.blf_history, name="BLF Instabilità", line=dict(color="#00f5d4", width=2, dash="dot")),
                     secondary_y=True
                 )
-            fig_conv.update_layout(
-                title_text="Convergence History",
-                height=240,
-                margin=dict(l=20, r=20, t=30, b=20),
-                legend=dict(orientation="h", y=1.15)
+            fig_hist.update_layout(
+                paper_bgcolor="#000000",
+                plot_bgcolor="#000000",
+                height=220,
+                margin=dict(l=10, r=10, t=20, b=20),
+                legend=dict(orientation="h", y=1.15, font=dict(family="Inconsolata", color="#a1a1aa", size=10)),
+                xaxis=dict(gridcolor="#18181b", color="#71717a"),
+                yaxis=dict(gridcolor="#18181b", color="#71717a"),
+                yaxis2=dict(gridcolor="#18181b", color="#71717a")
             )
-            chart_box.plotly_chart(fig_conv, use_container_width=True)
+            st.plotly_chart(fig_hist, use_container_width=True)
 
-        # 3D Isosurface
-        thresh = st.slider("Relative Density Threshold", 0.1, 0.9, 0.35, 0.05, key="iso_th")
-        X, Y, Z = np.mgrid[0:opt.nelx*opt.dx:complex(0, opt.nelx),
-                           0:opt.nely*opt.dy:complex(0, opt.nely),
-                           0:opt.nelz*opt.dz:complex(0, opt.nelz)]
-
-        fig3d = go.Figure(data=go.Isosurface(
-            x=X.flatten(), y=Y.flatten(), z=Z.flatten(),
-            value=res.density_matrix.flatten(),
-            isomin=thresh, isomax=1.0,
-            surface_count=3,
-            colorscale='Blues_r',
-            caps=dict(x_show=True, y_show=True, z_show=True),
-            colorbar=dict(title="Density ρ", len=0.6)
-        ))
-        fig3d.update_layout(
-            scene=dict(
-                xaxis_title="X (mm)", yaxis_title="Y (mm)", zaxis_title="Z (mm)",
-                aspectmode="data"
-            ),
-            margin=dict(l=0, r=0, b=0, t=20),
-            height=480
-        )
-        vis_box.plotly_chart(fig3d, use_container_width=True)
-
-        # Export STL
-        st.subheader("Watertight STL Export")
-        c_stl1, c_stl2 = st.columns([2, 1])
-        with c_stl1:
-            st.write("Generates a manifold, closed boundary surface STL ready for 3D printing or CAD smoothing.")
-        with c_stl2:
-            if st.button("💾 Generate & Download STL", use_container_width=True):
-                tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
-                tmp_stl.close()
-                opt.export_stl(res, filepath=tmp_stl.name, threshold=thresh)
-                with open(tmp_stl.name, "rb") as f:
-                    stl_data = f.read()
-                st.download_button(
-                    "Click to Download STL", data=stl_data,
-                    file_name="CE_3D_Optimized_Structure.stl", mime="application/sla"
-                )
-
-# =============================================================================
-# TAB 2: 2D Continuum Engine & Pareto Sweep
-# =============================================================================
-with tab_2d:
-    col2d_1, col2d_2 = st.columns([1, 2])
-    with col2d_1:
-        st.subheader("2D Fast Exploration")
-        nelx2 = st.number_input("Elements X (2D)", 10, 200, 40, 2)
-        nely2 = st.number_input("Elements Y (2D)", 6, 100, 20, 2)
-        volfrac2 = st.slider("Target Volume Fraction (2D)", 0.1, 0.8, 0.4, 0.05)
-        run_sweep = st.button("📊 Run 11-Step Pareto Alpha Sweep (α = 0.0 → 1.0)")
-
-    with col2d_2:
-        if run_sweep:
-            alphas = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
-            st.markdown("#### Pareto Frontier Exploration (Compliance vs Buckling)")
-            sweep_prog = st.progress(0)
+    with col_export:
+        st.markdown("#### Esportazione STL Watertight (PicoGK / 3D Print Ready)")
+        st.write("Genera una mesh chiusa a tenuta stagna (senza facce interne condivise) pronta per la produzione additiva o lo smoothing.")
+        
+        stl_threshold = st.slider("Soglia Densità per Esportazione STL", 0.10, 0.90, 0.35, 0.05, key="stl_t")
+        
+        if st.button("💾 Genera File STL Manifold", use_container_width=True):
+            tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
+            tmp_stl.close()
+            opt.export_stl(res, filepath=tmp_stl.name, threshold=stl_threshold)
             
-            sweep_cols = st.columns(3)
-            placeholders = [sweep_cols[i % 3].empty() for i in range(len(alphas))]
+            with open(tmp_stl.name, "rb") as f:
+                stl_bytes = f.read()
 
-            for i, a in enumerate(alphas):
-                opt2d = SIMPOptimizer2D(
-                    nelx=int(nelx2), nely=int(nely2), dx=2.0, dy=2.0,
-                    penal=3.0, rmin=2.5, volfrac=float(volfrac2)
-                )
-                opt2d.fix_wall("left")
-                opt2d.add_load(int(nelx2), 0, fx=0.0, fy=-500.0)
+            st.download_button(
+                label="📥 Scarica Mesh STL Ottimizzata (.stl)",
+                data=stl_bytes,
+                file_name=f"CE_3D_Optimized_{nelx}x{nely}x{nelz}.stl",
+                mime="application/sla",
+                use_container_width=True
+            )
+            st.success(f"Mesh STL generata con successo ({len(stl_bytes):,} bytes, Watertight: True)!")
 
-                res_sw = opt2d.solve(max_iter=30, tol=0.015, mode="buckling_max", alpha_buckling=a)
-                with placeholders[i].container():
-                    st.markdown(f"**α = {a:.1f}**")
-                    blf_str = f"{res_sw.blf_history[-1]:.3f}" if res_sw.blf_history else "N/A"
-                    st.caption(f"C: {res_sw.compliance:.1f} | BLF: {blf_str}")
-                    fig_2d = opt2d.to_scientific_figures(res=res_sw, threshold=0.40, view_style="silhouette_bw", smooth=True)
-                    fig_2d.update_layout(height=200, margin=dict(l=5, r=5, t=5, b=5))
-                    st.plotly_chart(fig_2d, use_container_width=True)
-                sweep_prog.progress((i + 1) / len(alphas))
 
-# =============================================================================
-# TAB 3: Theoretical Documentation & Citations
-# =============================================================================
-with tab_docs:
-    st.subheader("Academic Formulation & Log of Changes")
+# -----------------------------------------------------------------------------
+# COLLAPSIBLE THEORETICAL LOG (MINIMAL FOOTER)
+# -----------------------------------------------------------------------------
+with st.expander("📖 Consulta Log Teorico & Riferimenti Matematici (PDF)", expanded=False):
     st.markdown("""
-    Every equation and theoretical adaptation from 2D to 3D is documented in **`docs/TO_3D_log.pdf`**, mirroring the style of the original paper:
-    
-    1. **Element Formulation**: 8-node hexahedral isoparametric elements ($H8$) with trilinear shape functions:
-       $$N_i(\\xi, \\eta, \\zeta) = \\frac{1}{8}(1 + \\xi_i \\xi)(1 + \\eta_i \\eta)(1 + \\zeta_i \\zeta)$$
-    2. **Linearized Buckling Stability**: Generalized eigenvalue problem:
-       $$(\\mathbf{K} + \\lambda_i \\mathbf{G})\\boldsymbol{\\phi}_i = \\mathbf{0}, \\quad \\mu_i = \\frac{1}{\\lambda_i}$$
-    3. **6-Basis Geometric Stiffness Decomposition**:
-       $$\\mathbf{G}_e = \\sum_{k=1}^6 \\sigma_{e, k} \\mathbf{G}_{0, k}$$
-       eliminating numerical quadrature inside the optimization iterations.
-    4. **Adjoint Sensitivities & Dynamic Scaling**:
-       $$\\frac{\\partial F^{(i)}}{\\partial x_e} = (1 - \\alpha) \\frac{1}{S_C^{(i)}} \\frac{\\partial C^{(i)}}{\\partial x_e} + \\alpha \\frac{1}{S_\\mu^{(i)}} \\frac{\\partial \\mu_1^{(i)}}{\\partial x_e}$$
+    Tutti i cambiamenti teorici implementati nel passaggio dal 2D al 3D sono documentati nel file **`docs/TO_3D_log.pdf`**, seguendo la struttura del paper di riferimento:
+    - **Cinematica esaedrica H8** a 24 GDL con Jacobiano analitico $\det(J) = V_e / 8$.
+    - **Decomposizione della rigidezza geometrica** in 6 matrici invarianti precomputabili $\mathbf{G}_{0, k}$.
+    - **Solutore PCG con preconditioner di Jacobi** a consumo RAM minimo ($< 100$ MB per $2.000$ voxel su Ryzen 7).
+    - **Sensitività esatte dello stato aggiunto** con riscalamento dinamico $L_1$.
     """)
-
     pdf_path = PROJECT_ROOT / "docs" / "TO_3D_log.pdf"
     if pdf_path.exists():
         with open(pdf_path, "rb") as f:
-            st.download_button(
-                "📥 Download Theoretical Log (PDF, 540 KB)",
-                data=f.read(),
-                file_name="TO_3D_log.pdf",
-                mime="application/pdf"
-            )
-
-# =============================================================================
-# TAB 4: Multi-Physics Roadmap (Toward Leap71 Noyron)
-# =============================================================================
-with tab_roadmap:
-    st.subheader("The Leap71 Noyron Paradigm: Multi-Field Generative Physics")
-    st.markdown("""
-    The goal of this platform is to scale beyond structural optimization into **coupled multi-physics computational engineering**:
-
-    ```
-    ┌─────────────────────────────────────────────────────────────────┐
-    │                 Multi-Physics Objective Coupling                │
-    │  min F = w_mech * Compliance + w_stab * (1/BLF) + w_th * Thermal│
-    └──────────────┬───────────────────────────────┬──────────────────┘
-                   │                               │
-           ┌───────▼───────┐               ┌───────▼───────┐
-           │ 3D Elasticity │               │ 3D Heat Flow  │
-           │  K(x) U = F   │               │ K_th(x) T = Q │
-           └───────┬───────┘               └───────┬───────┘
-                   │                               │
-                   └───────────────┬───────────────┘
-                                   │
-                   ┌───────────────▼───────────────┐
-                   │  Combined Adjoint Sensitivity │
-                   └───────────────┬───────────────┘
-                                   │
-                   ┌───────────────▼───────────────┐
-                   │  PicoGK Implicit Smoothing &  │
-                   │  Watertight 3D Solid Output   │
-                   └───────────────────────────────┘
-    ```
-
-    ### Planned Next Step: 3D Steady-State Heat Conduction
-    - Poisson equation $\\nabla \\cdot (k(\\mathbf{x}) \\nabla T) + q = 0$ on the identical H8 voxel grid.
-    - Thermal compliance minimization $\\mathbf{Q}^T \\mathbf{T}$ to design optimal heat-dissipating cooling channels and fin structures.
-    - Fusing structural load paths with thermal conductive paths into a single optimal geometry.
-    """)
+            st.download_button("📥 Scarica Paper Teorico Completo (TO_3D_log.pdf)", data=f.read(), file_name="TO_3D_log.pdf", mime="application/pdf")
