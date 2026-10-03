@@ -266,6 +266,8 @@ class SIMPResult3D:
     dx: float = 1.0
     dy: float = 1.0
     dz: float = 1.0
+    displacements: Optional[np.ndarray] = None
+    stresses: Optional[Dict[str, np.ndarray]] = None
 
     def export_voxel_stl(self, filepath: str, threshold: float = 0.5) -> str:
         """
@@ -878,6 +880,13 @@ class SIMPOptimizer3D:
         except Exception:
             peak_memory_mb = float(12030.0 * self.num_elements / (1024.0 * 1024.0))
 
+        # Compute 3D stress tensors and principal stresses
+        stresses_raw = self.compute_principal_stresses(U)
+        stresses_3d = {
+            k: v.reshape((self.nelz, self.nely, self.nelx))
+            for k, v in stresses_raw.items()
+        }
+
         return SIMPResult3D(
             success=True,
             density_matrix=density_matrix,
@@ -895,5 +904,7 @@ class SIMPOptimizer3D:
             nelz=self.nelz,
             dx=self.dx,
             dy=self.dy,
-            dz=self.dz
+            dz=self.dz,
+            displacements=U,
+            stresses=stresses_3d
         )

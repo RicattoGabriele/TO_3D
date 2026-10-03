@@ -187,14 +187,17 @@ def build_domain_preview_figure(
     applied_loads: List[Tuple[float, float, float, float, float, float]],
     res: Optional[SIMPResult3D] = None,
     threshold: float = 0.35,
-    view_mode: str = "preview"
+    view_mode: str = "preview",
+    stress_field_key: str = "von_mises",
+    stress_colormap: str = "Turbo",
+    stress_field_name: str = "Von Mises"
 ) -> go.Figure:
     """
     Renders an interactive 3D Plotly visualization:
     - Bounding volume parallelepiped [0..Lx] x [0..Ly] x [0..Lz]
     - Fixed supports as high-visibility colored elements (Cyan/Green glyphs)
     - Applied loads as bright colored vectors/arrows (Magenta/Red glyphs)
-    - Optionally overlays the converged 3D topology isosurface if solved.
+    - Optimized topology isosurface or full 3D Thermal Stress Heatmap across solid voxels.
     """
     Lx = float(nelx * dx)
     Ly = float(nely * dy)
@@ -203,14 +206,6 @@ def build_domain_preview_figure(
     fig = go.Figure()
 
     # 1. Bounding Box Parallelepiped Wireframe (12 Edges)
-    # Vertices of the parallelepiped
-    # 0:(0,0,0), 1:(Lx,0,0), 2:(Lx,Ly,0), 3:(0,Ly,0)
-    # 4:(0,0,Lz), 5:(Lx,0,Lz), 6:(Lx,Ly,Lz), 7:(0,Ly,Lz)
-    edge_x = [0, Lx, Lx, 0, 0,  0, Lx, Lx, 0, 0,  Lx, Lx,  Lx, Lx,  0, 0]
-    edge_y = [0, 0,  Ly, Ly, 0,  0, 0,  Ly, Ly, 0,  0,  Ly,  Ly, 0,   Ly, Ly]
-    edge_z = [0, 0,  0,  0,  0,  Lz, Lz, Lz, Lz, Lz, 0,  0,   Lz, Lz,  0, Lz]
-
-    # Wireframe edges
     fig.add_trace(go.Scatter3d(
         x=[
             0, Lx, Lx, 0, 0, None,
@@ -263,7 +258,6 @@ def build_domain_preview_figure(
         fx_z = [pt[2] for pt in fixed_nodes_coords]
         fx_hover = [f"Support ({pt[0]:.1f}, {pt[1]:.1f}, {pt[2]:.1f}) mm<br>DOFs: {pt[3]}" for pt in fixed_nodes_coords]
 
-        # Use slightly larger size for points, scaled appropriately
         marker_size = max(5, min(14, int(220 / max(nelx, nely, nelz))))
 
         fig.add_trace(go.Scatter3d(
@@ -287,7 +281,6 @@ def build_domain_preview_figure(
             if mag < 1e-6:
                 continue
 
-            # Load application node marker
             fig.add_trace(go.Scatter3d(
                 x=[lx], y=[ly], z=[lz],
                 mode="markers",
@@ -302,14 +295,11 @@ def build_domain_preview_figure(
                 name=f"Load #{idx+1} Point"
             ))
 
-            # Scaled 3D force vector arrow line
-            # Arrow length proportional to domain size (approx 15% of diagonal)
             arrow_scale = 0.22 * max(Lx, Ly, Lz)
             dir_x = (f_x / mag) * arrow_scale
             dir_y = (f_y / mag) * arrow_scale
             dir_z = (f_z / mag) * arrow_scale
 
-            # Vector line pointing from load point in direction of force
             fig.add_trace(go.Scatter3d(
                 x=[lx, lx + dir_x],
                 y=[ly, ly + dir_y],
@@ -322,7 +312,7 @@ def build_domain_preview_figure(
                 name=f"Load #{idx+1} Vector"
             ))
 
-    # 4. Optimized Geometry (if computed and requested)
+    # 4. Optimized Geometry (Isosurface)
     if res is not None and view_mode == "result":
         X, Y, Z = np.mgrid[0:Lx:complex(0, nelx),
                            0:Ly:complex(0, nely),
@@ -346,6 +336,48 @@ def build_domain_preview_figure(
             ),
             name="Optimized Topology"
         ))
+
+    # 5. Thermal Stress Heatmap (High-Contrast Gradient on Solid Voxels)
+    if res is not None and view_mode == "stress" and res.stresses is not None:
+        stress_matrix = res.stresses.get(stress_field_key, res.stresses.get("von_mises"))
+        solid_mask = (res.density_matrix >= threshold)
+        iz_arr, iy_arr, ix_arr = np.where(solid_mask)
+
+        if len(ix_arr) > 0:
+            solid_x = (ix_arr + 0.5) * dx
+            solid_y = (iy_arr + 0.5) * dy
+            solid_z = (iz_arr + 0.5) * dz
+            solid_vals = stress_matrix[iz_arr, iy_arr, ix_arr]
+            solid_dens = res.density_matrix[iz_arr, iy_arr, ix_arr]
+
+            hover_texts = [
+                f"Voxel ({ix}, {iy}, {iz})<br>Pos: ({x:.1f}, {y:.1f}, {z:.1f}) mm<br>Densità: {rho:.2f}<br>{stress_field_name}: {val:.2f} MPa"
+                for ix, iy, iz, x, y, z, rho, val in zip(ix_arr, iy_arr, iz_arr, solid_x, solid_y, solid_z, solid_dens, solid_vals)
+            ]
+
+            marker_sz = max(5, min(20, int(420 / max(nelx, nely, nelz))))
+
+            fig.add_trace(go.Scatter3d(
+                x=solid_x, y=solid_y, z=solid_z,
+                mode="markers",
+                marker=dict(
+                    size=marker_sz,
+                    color=solid_vals,
+                    colorscale=stress_colormap,
+                    colorbar=dict(
+                        title=dict(text=f"{stress_field_name} (MPa)", font=dict(color="#ffffff", size=10)),
+                        tickfont=dict(color="#a1a1aa", size=9),
+                        len=0.6,
+                        x=1.02
+                    ),
+                    showscale=True,
+                    symbol="square",
+                    opacity=0.96
+                ),
+                text=hover_texts,
+                hoverinfo="text",
+                name=f"Stress: {stress_field_name}"
+            ))
 
     # Plotly Layout: Pitch Black Background, Minimalist Axes
     fig.update_layout(
@@ -521,26 +553,66 @@ with col_right:
     # Determine if we have a converged solution in state
     has_result = "res3d" in st.session_state and st.session_state["res3d"] is not None
 
-    # Toggle between preview and result if solved
     view_choice = "preview"
     threshold_val = 0.35
+    selected_stress_key = "von_mises"
+    selected_stress_cmap = "Turbo"
+    selected_stress_name = "Von Mises"
+
     if has_result:
-        col_t1, col_t2 = st.columns([1, 2])
-        view_choice = col_t1.radio("Visualizzazione:", ["result", "preview"], index=0, format_func=lambda x: "Topologia Ottimizzata" if x=="result" else "Solo Dominio & Vincoli", horizontal=True)
+        col_t1, col_t2 = st.columns([3, 2])
+        view_choice = col_t1.radio(
+            "Modalità Visualizzazione:",
+            ["result", "stress", "preview"],
+            index=0,
+            format_func=lambda x: "🧊 Topologia (Densità)" if x=="result" else ("🔥 Mappa Termica Sforzi" if x=="stress" else "📐 Solo Dominio & Vincoli"),
+            horizontal=True
+        )
         threshold_val = col_t2.slider("Soglia Densità Isosuperficie", 0.10, 0.90, 0.35, 0.05)
 
+        if view_choice == "stress":
+            col_s1, col_s2 = st.columns(2)
+            stress_label = col_s1.selectbox(
+                "Componente Sforzo da Visualizzare:",
+                [
+                    "Von Mises (Sforzo Equivalente)",
+                    "σ_III Minimo Principale (Compressione / Instabilità)",
+                    "σ_I Massimo Principale (Trazione)",
+                    "σ_xx Sforzo Normale X",
+                    "σ_yy Sforzo Normale Y",
+                    "σ_zz Sforzo Normale Z"
+                ]
+            )
+            key_map = {
+                "Von Mises (Sforzo Equivalente)": ("von_mises", "Von Mises"),
+                "σ_III Minimo Principale (Compressione / Instabilità)": ("sigma_III", "σ_III (Compressione)"),
+                "σ_I Massimo Principale (Trazione)": ("sigma_I", "σ_I (Trazione)"),
+                "σ_xx Sforzo Normale X": ("sigma_xx", "σ_xx"),
+                "σ_yy Sforzo Normale Y": ("sigma_yy", "σ_yy"),
+                "σ_zz Sforzo Normale Z": ("sigma_zz", "σ_zz")
+            }
+            selected_stress_key, selected_stress_name = key_map.get(stress_label, ("von_mises", "Von Mises"))
 
-# Render the interactive 3D Domain immediately on startup or parameter change
-preview_fig = build_domain_preview_figure(
-    nelx=nelx, nely=nely, nelz=nelz,
-    dx=dx, dy=dy, dz=dz,
-    fixed_nodes_coords=custom_supports,
-    applied_loads=applied_loads,
-    res=st.session_state.get("res3d", None),
-    threshold=threshold_val,
-    view_mode=view_choice
-)
-preview_placeholder.plotly_chart(preview_fig, use_container_width=True)
+            selected_stress_cmap = col_s2.selectbox(
+                "Palette Termica (Colormap):",
+                ["Turbo", "Jet", "Inferno", "Plasma", "Hot"],
+                index=0
+            )
+
+    # Render the interactive 3D Domain immediately on startup or parameter change
+    preview_fig = build_domain_preview_figure(
+        nelx=nelx, nely=nely, nelz=nelz,
+        dx=dx, dy=dy, dz=dz,
+        fixed_nodes_coords=custom_supports,
+        applied_loads=applied_loads,
+        res=st.session_state.get("res3d", None),
+        threshold=threshold_val,
+        view_mode=view_choice,
+        stress_field_key=selected_stress_key,
+        stress_colormap=selected_stress_cmap,
+        stress_field_name=selected_stress_name
+    )
+    preview_placeholder.plotly_chart(preview_fig, use_container_width=True)
 
 
 # -----------------------------------------------------------------------------
@@ -611,7 +683,10 @@ if run_btn:
         applied_loads=applied_loads,
         res=res,
         threshold=threshold_val,
-        view_mode="result"
+        view_mode="result",
+        stress_field_key=selected_stress_key,
+        stress_colormap=selected_stress_cmap,
+        stress_field_name=selected_stress_name
     )
     preview_placeholder.plotly_chart(updated_fig, use_container_width=True)
 
@@ -627,13 +702,23 @@ if "res3d" in st.session_state and st.session_state["res3d"] is not None:
     col_metrics, col_export = st.columns([1, 1])
 
     with col_metrics:
-        st.markdown("#### Metriche di Convergenza")
+        st.markdown("#### Metriche di Convergenza & Sforzi")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Compliance (N·mm)", f"{res.compliance:.3e}")
         blf_str = f"{res.blf_history[-1]:.4f}" if res.blf_history else "N/A"
         m2.metric("BLF Fondamentale", blf_str)
         m3.metric("Frazione Volume", f"{res.volume_fraction*100:.1f}%")
         m4.metric("Tempo Calcolo", f"{res.execution_time_sec:.1f}s")
+
+        if res.stresses is not None:
+            st.markdown("##### Stato Tensionale Strutturale (Estremi Solidi)")
+            s1, s2, s3 = st.columns(3)
+            vm = res.stresses.get("von_mises", np.array([0.0]))
+            s3_min = res.stresses.get("sigma_III", np.array([0.0]))
+            s1_max = res.stresses.get("sigma_I", np.array([0.0]))
+            s1.metric("Picco Von Mises", f"{float(np.max(vm)):.2f} MPa")
+            s2.metric("Picco Compressione (σ_III)", f"{float(np.min(s3_min)):.2f} MPa")
+            s3.metric("Picco Trazione (σ_I)", f"{float(np.max(s1_max)):.2f} MPa")
 
         if res.compliance_history:
             fig_hist = make_subplots(specs=[[{"secondary_y": True}]])
