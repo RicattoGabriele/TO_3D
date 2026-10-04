@@ -1,8 +1,8 @@
 @echo off
-title CE-3D Dashboard Launcher
+title CE-3D Launcher
+cd /d "%~dp0"
 echo ========================================================
-echo Avvio della Dashboard CE-3D (Ottimizzazione Topologica)
+echo Avvio della Dashboard CE-3D...
 echo ========================================================
-start "" http://localhost:8501
 python -m streamlit run dashboard/app.py --server.port=8501
 pause
