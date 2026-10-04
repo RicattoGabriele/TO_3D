@@ -380,8 +380,121 @@ class SIMPResult3D:
             verts = np.vstack(vertices_list)
             faces = np.array(faces_list, dtype=np.int32)
             mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
-            trimesh.repair.fix_normals(mesh)
 
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+        mesh.export(filepath)
+        return filepath
+
+    def get_boundary_mesh(
+        self,
+        threshold: float = 0.35,
+        smooth_iterations: int = 0,
+        subdivide: bool = False
+    ):
+        """
+        Extracts a closed watertight boundary mesh of the solid voxels with optional
+        subdivision and volume-preserving Taubin smoothing (non-shrinking).
+        """
+        import trimesh
+
+        solid = (self.density_matrix >= threshold)
+        if not np.any(solid):
+            solid = (self.density_matrix >= np.percentile(self.density_matrix, 50))
+            if not np.any(solid):
+                solid = np.ones_like(self.density_matrix, dtype=bool)
+
+        nz, ny, nx = solid.shape
+        dx, dy, dz = self.dx, self.dy, self.dz
+        padded = np.pad(solid, 1, mode='constant', constant_values=False)
+
+        vertices_list = []
+        faces_list = []
+        v_offset = 0
+
+        directions = [
+            ('x-', lambda iz, iy, ix: [
+                [ix*dx, iy*dy,       iz*dz],
+                [ix*dx, (iy+1)*dy,   iz*dz],
+                [ix*dx, (iy+1)*dy,   (iz+1)*dz],
+                [ix*dx, iy*dy,       (iz+1)*dz],
+            ]),
+            ('x+', lambda iz, iy, ix: [
+                [(ix+1)*dx, iy*dy,       iz*dz],
+                [(ix+1)*dx, iy*dy,       (iz+1)*dz],
+                [(ix+1)*dx, (iy+1)*dy,   (iz+1)*dz],
+                [(ix+1)*dx, (iy+1)*dy,   iz*dz],
+            ]),
+            ('y-', lambda iz, iy, ix: [
+                [ix*dx,       iy*dy, iz*dz],
+                [ix*dx,       iy*dy, (iz+1)*dz],
+                [(ix+1)*dx,   iy*dy, (iz+1)*dz],
+                [(ix+1)*dx,   iy*dy, iz*dz],
+            ]),
+            ('y+', lambda iz, iy, ix: [
+                [ix*dx,       (iy+1)*dy, iz*dz],
+                [(ix+1)*dx,   (iy+1)*dy, iz*dz],
+                [(ix+1)*dx,   (iy+1)*dy, (iz+1)*dz],
+                [ix*dx,       (iy+1)*dy, (iz+1)*dz],
+            ]),
+            ('z-', lambda iz, iy, ix: [
+                [ix*dx,       iy*dy,       iz*dz],
+                [(ix+1)*dx,   iy*dy,       iz*dz],
+                [(ix+1)*dx,   (iy+1)*dy,   iz*dz],
+                [ix*dx,       (iy+1)*dy,   iz*dz],
+            ]),
+            ('z+', lambda iz, iy, ix: [
+                [ix*dx,       iy*dy,       (iz+1)*dz],
+                [(ix+1)*dx,   iy*dy,       (iz+1)*dz],
+                [(ix+1)*dx,   (iy+1)*dy,   (iz+1)*dz],
+                [ix*dx,       (iy+1)*dy,   (iz+1)*dz],
+            ]),
+        ]
+
+        neighbor_masks = {
+            'x-': padded[1:nz+1, 1:ny+1, 0:nx],
+            'x+': padded[1:nz+1, 1:ny+1, 2:nx+2],
+            'y-': padded[1:nz+1, 0:ny,   1:nx+1],
+            'y+': padded[1:nz+1, 2:ny+2, 1:nx+1],
+            'z-': padded[0:nz,   1:ny+1, 1:nx+1],
+            'z+': padded[2:nz+2, 1:ny+1, 1:nx+1],
+        }
+
+        for dir_key, quad_fn in directions:
+            boundary_mask = solid & ~neighbor_masks[dir_key]
+            iz_arr, iy_arr, ix_arr = np.where(boundary_mask)
+
+            for iz, iy, ix in zip(iz_arr, iy_arr, ix_arr):
+                quad = np.array(quad_fn(int(iz), int(iy), int(ix)), dtype=np.float64)
+                vertices_list.append(quad)
+                faces_list.append([v_offset, v_offset+1, v_offset+2])
+                faces_list.append([v_offset, v_offset+2, v_offset+3])
+                v_offset += 4
+
+        if not vertices_list:
+            mesh = trimesh.creation.box()
+        else:
+            verts = np.vstack(vertices_list)
+            faces = np.array(faces_list, dtype=np.int32)
+            mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+
+        if subdivide and smooth_iterations > 0 and len(mesh.faces) < 20000:
+            mesh = mesh.subdivide()
+
+        if smooth_iterations > 0 and len(mesh.vertices) > 0:
+            # Volume-preserving Taubin smoothing (does not shrink the structure)
+            trimesh.smoothing.filter_taubin(mesh, lamb=0.5, nu=-0.53, iterations=int(smooth_iterations))
+
+        return mesh
+
+    def export_smooth_stl(
+        self,
+        filepath: str,
+        threshold: float = 0.35,
+        smooth_iterations: int = 10,
+        subdivide: bool = False
+    ) -> str:
+        """Exports volume-preserving Taubin smoothed watertight STL file."""
+        mesh = self.get_boundary_mesh(threshold=threshold, smooth_iterations=smooth_iterations, subdivide=subdivide)
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         mesh.export(filepath)
         return filepath
@@ -568,14 +681,35 @@ class SIMPOptimizer3D:
         self.force_vector[3 * nid + 1] += fy
         self.force_vector[3 * nid + 2] += fz
 
-    def export_stl(self, result: SIMPResult3D, filepath: str, threshold: float = 0.5) -> str:
+    def export_stl(self, result: SIMPResult3D, filepath: str, threshold: float = 0.35) -> str:
         """Delegates STL export to the SIMPResult3D container."""
         return result.export_voxel_stl(filepath, threshold)
+
+    def export_smooth_stl(
+        self,
+        result: SIMPResult3D,
+        filepath: str,
+        threshold: float = 0.35,
+        smooth_iterations: int = 10,
+        subdivide: bool = False
+    ) -> str:
+        """Delegates smooth STL export to the SIMPResult3D container."""
+        return result.export_smooth_stl(filepath, threshold, smooth_iterations, subdivide)
+
+    def get_mesh(
+        self,
+        result: SIMPResult3D,
+        threshold: float = 0.35,
+        smooth_iterations: int = 0,
+        subdivide: bool = False
+    ):
+        """Returns trimesh object (raw or Taubin-smoothed) for direct 3D visualization."""
+        return result.get_boundary_mesh(threshold, smooth_iterations, subdivide)
 
     def compute_principal_stresses(self, U: np.ndarray) -> Dict[str, np.ndarray]:
         """
         Computes centroidal Cauchy stresses, 3D principal stresses (sigma_I, sigma_II, sigma_III),
-        and von Mises equivalent stress across all elements.
+        Signed Principal Stress (tension > 0 vs compression < 0), and von Mises equivalent stress.
         """
         U_e = U[self.edofMat]
         sigma_all = U_e @ self.DB0_T  # shape (num_elements, 6)
@@ -604,15 +738,25 @@ class SIMPOptimizer3D:
 
         # Eigenvalues sorted ascending: [sigma_III, sigma_II, sigma_I]
         eigvals = np.linalg.eigvalsh(stress_tensors)
-        sigma_3 = eigvals[:, 0]
-        sigma_2 = eigvals[:, 1]
-        sigma_1 = eigvals[:, 2]
+        sigma_3 = eigvals[:, 0]  # Minimum principal stress (Compression, typically < 0)
+        sigma_2 = eigvals[:, 1]  # Intermediate principal stress
+        sigma_1 = eigvals[:, 2]  # Maximum principal stress (Tension, typically > 0)
+
+        # Signed Principal Stress:
+        # If absolute tension is larger than compression, use sigma_1 (positive).
+        # Otherwise use sigma_3 (negative). This precisely distinguishes tension vs compression chords.
+        abs_s1 = np.abs(sigma_1)
+        abs_s3 = np.abs(sigma_3)
+        sigma_signed = np.where(abs_s1 >= abs_s3, sigma_1, sigma_3)
+        von_mises_signed = np.sign(sigma_signed) * von_mises
 
         return {
             "sigma_xx": s_xx, "sigma_yy": s_yy, "sigma_zz": s_zz,
             "tau_yz": t_yz, "tau_xz": t_xz, "tau_xy": t_xy,
             "sigma_I": sigma_1, "sigma_II": sigma_2, "sigma_III": sigma_3,
-            "von_mises": von_mises
+            "sigma_signed": sigma_signed,
+            "von_mises": von_mises,
+            "von_mises_signed": von_mises_signed
         }
 
     def solve(
@@ -694,9 +838,9 @@ class SIMPOptimizer3D:
         for it in range(1, max_iterations + 1):
             iterations = it
 
-            # 3. Density Filtering and Heaviside Projection Continuation
-            # Continuation: beta doubles every 15 iterations (max 32)
-            beta = min(32.0, 1.0 * (2.0 ** (it // 15)))
+            # 3. Density Filtering and Accelerated Heaviside Projection Continuation
+            # Ramps beta progressively to eliminate grey intermediate elements and produce slender chords
+            beta = float(min(32.0, 1.0 * (2.0 ** (it // 4))))
             eta = 0.5
             denom = np.tanh(beta * eta) + np.tanh(beta * (1.0 - eta))
 

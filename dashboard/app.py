@@ -256,6 +256,7 @@ def build_domain_preview_figure(
     res: Optional[SIMPResult3D] = None,
     threshold: float = 0.35,
     view_mode: str = "preview",
+    smooth_iterations: int = 0,
     stress_field_key: str = "von_mises",
     stress_colormap: str = "Turbo",
     stress_field_name: str = "Von Mises"
@@ -376,33 +377,67 @@ def build_domain_preview_figure(
                 showlegend=False
             ))
 
-    # 4. Topology Mesh (Exact Watertight CAD Faces via Trimesh Extraction)
-    if res is not None and view_mode == "result":
-        tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
-        tmp_stl.close()
+    # 4. Topology Mesh (Exact Watertight CAD Faces via Trimesh Extraction + Taubin Smoothing)
+    if res is not None and view_mode in ["tension_compression", "result", "cad"]:
         try:
-            res.export_stl(filepath=tmp_stl.name, threshold=threshold)
-            m = trimesh.load(tmp_stl.name)
+            m = res.get_boundary_mesh(threshold=threshold, smooth_iterations=smooth_iterations)
             if len(m.vertices) > 0 and len(m.faces) > 0:
-                fig.add_trace(go.Mesh3d(
-                    x=m.vertices[:, 0],
-                    y=m.vertices[:, 1],
-                    z=m.vertices[:, 2],
-                    i=m.faces[:, 0],
-                    j=m.faces[:, 1],
-                    k=m.faces[:, 2],
-                    color="#38bdf8",
-                    opacity=0.96,
-                    flatshading=True,
-                    lighting=dict(ambient=0.45, diffuse=0.8, specular=0.2),
-                    name="Topology",
-                    showlegend=False
-                ))
+                vx, vy, vz = m.vertices[:, 0], m.vertices[:, 1], m.vertices[:, 2]
+
+                if view_mode == "tension_compression" and res.stresses is not None and "sigma_signed" in res.stresses:
+                    # Map signed stress to vertices (positive = tension/red, negative = compression/blue)
+                    s_signed = res.stresses["sigma_signed"]
+                    ix = np.clip((vx / dx).astype(int), 0, nelx - 1)
+                    iy = np.clip((vy / dy).astype(int), 0, nely - 1)
+                    iz = np.clip((vz / dz).astype(int), 0, nelz - 1)
+                    v_stress = s_signed[iz, iy, ix]
+                    max_abs = float(np.max(np.abs(v_stress)))
+                    if max_abs < 1e-6:
+                        max_abs = 1.0
+
+                    fig.add_trace(go.Mesh3d(
+                        x=vx, y=vy, z=vz,
+                        i=m.faces[:, 0], j=m.faces[:, 1], k=m.faces[:, 2],
+                        intensity=v_stress,
+                        colorscale="RdBu_r",  # Blue = Compression, Red = Tension
+                        cmin=-max_abs,
+                        cmax=max_abs,
+                        colorbar=dict(
+                            title=dict(text="σ (MPa)<br>[- Comp / + Tens]", font=dict(color="#ffffff", size=9, family="Inconsolata")),
+                            tickfont=dict(color="#71717a", size=8, family="Inconsolata"),
+                            len=0.50,
+                            x=1.02
+                        ),
+                        opacity=0.98,
+                        flatshading=(smooth_iterations == 0),
+                        lighting=dict(ambient=0.5, diffuse=0.8, specular=0.2),
+                        name="Tension / Compression",
+                        showlegend=False
+                    ))
+                elif view_mode == "cad":
+                    fig.add_trace(go.Mesh3d(
+                        x=vx, y=vy, z=vz,
+                        i=m.faces[:, 0], j=m.faces[:, 1], k=m.faces[:, 2],
+                        color="#e4e4e7",  # Sleek titanium white
+                        opacity=0.96,
+                        flatshading=(smooth_iterations == 0),
+                        lighting=dict(ambient=0.45, diffuse=0.8, specular=0.25),
+                        name="CAD Surface",
+                        showlegend=False
+                    ))
+                else:
+                    fig.add_trace(go.Mesh3d(
+                        x=vx, y=vy, z=vz,
+                        i=m.faces[:, 0], j=m.faces[:, 1], k=m.faces[:, 2],
+                        color="#38bdf8",
+                        opacity=0.96,
+                        flatshading=(smooth_iterations == 0),
+                        lighting=dict(ambient=0.45, diffuse=0.8, specular=0.2),
+                        name="Topology",
+                        showlegend=False
+                    ))
         except Exception:
             pass
-        finally:
-            if os.path.exists(tmp_stl.name):
-                os.remove(tmp_stl.name)
 
     # 5. Thermal Stress Heatmap (High-Contrast Gradient on Solid Voxels)
     if res is not None and view_mode == "stress" and res.stresses is not None:
@@ -573,10 +608,10 @@ with st.sidebar:
         applied_loads.append((lp_x, lp_y, lp_z, float(lf_x), float(lf_y), float(lf_z)))
 
     st.markdown('<div class="sec-head">4. Parametri</div>', unsafe_allow_html=True)
-    volfrac = st.slider("Frazione volume (Vf)", 0.10, 0.80, 0.35, 0.05)
+    volfrac = st.slider("Frazione volume (Vf)", 0.05, 0.80, 0.20, 0.05)
     alpha = st.slider("Peso buckling (α)", 0.00, 0.90, 0.30, 0.05)
-    rmin = st.slider("Filtro r_min (mm)", 0.5, 6.0, 1.5, 0.5)
-    max_iter = st.slider("Iterazioni", 5, 60, 25, 5)
+    rmin = st.slider("Filtro r_min (mm)", 0.5, 6.0, 1.2, 0.1)
+    max_iter = st.slider("Iterazioni", 5, 80, 25, 5)
     solver_opt = st.selectbox("Solutore", ["PCG + Jacobi", "Diretto"])
     solver_key = "pcg" if "PCG" in solver_opt else "direct"
 
@@ -653,26 +688,27 @@ has_result = ("res3d" in st.session_state and st.session_state["res3d"] is not N
 
 view_choice = "preview"
 threshold_val = 0.35
+smooth_val = 6
 selected_stress_key = "von_mises"
 selected_stress_cmap = "Turbo"
 selected_stress_name = "Von Mises"
 
 if not has_result:
-    # Pure clean domain header
     st.markdown(f'<div style="font-size:0.85rem; color:#71717a; margin-bottom:0.5rem; letter-spacing:0.05em;">DOMINIO 3D: {Lx:.1f} × {Ly:.1f} × {Lz:.1f} mm | {nelx}×{nely}×{nelz} elementi ({nelx*nely*nelz:,} voxel)</div>', unsafe_allow_html=True)
 else:
-    # Result toolbar
-    c_mode, c_thresh, c_reset = st.columns([3, 2, 1])
-    view_choice = c_mode.radio(
-        "Vista:",
-        ["result", "stress", "preview"],
+    # Full Result Toolbar
+    col_v1, col_v2, col_v3, col_v4 = st.columns([3, 2, 2, 1])
+    view_choice = col_v1.radio(
+        "Modalità Vista:",
+        ["tension_compression", "cad", "stress", "preview"],
         index=0,
-        format_func=lambda x: "Topologia" if x=="result" else ("Sforzi" if x=="stress" else "Dominio"),
+        format_func=lambda x: "Trazione / Compressione" if x=="tension_compression" else ("Monocromatico CAD" if x=="cad" else ("Sforzi Termici" if x=="stress" else "Solo Dominio")),
         horizontal=True,
         label_visibility="collapsed"
     )
-    threshold_val = c_thresh.slider("Soglia densità", 0.10, 0.90, 0.35, 0.05, label_visibility="collapsed")
-    if c_reset.button("RESET", use_container_width=True):
+    threshold_val = col_v2.slider("Soglia densità", 0.05, 0.90, 0.30, 0.05)
+    smooth_val = col_v3.slider("Smoothing (Taubin)", 0, 15, 6, 1)
+    if col_v4.button("RESET", use_container_width=True):
         del st.session_state["res3d"]
         if "opt3d" in st.session_state:
             del st.session_state["opt3d"]
@@ -709,6 +745,7 @@ preview_fig = build_domain_preview_figure(
     res=st.session_state.get("res3d", None),
     threshold=threshold_val,
     view_mode=view_choice if has_result else "preview",
+    smooth_iterations=smooth_val,
     stress_field_key=selected_stress_key,
     stress_colormap=selected_stress_cmap,
     stress_field_name=selected_stress_name
@@ -723,13 +760,13 @@ if has_result:
     res = st.session_state["res3d"]
     opt = st.session_state["opt3d"]
 
-    st.markdown('<div class="sec-head">Risultati</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-head">Risultati Ottimizzazione</div>', unsafe_allow_html=True)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Compliance", f"{res.compliance:.3e} N·mm")
     blf_str = f"{res.blf_history[-1]:.4f}" if res.blf_history else "N/A"
-    m2.metric("BLF", blf_str)
+    m2.metric("BLF Instabilità", blf_str)
     m3.metric("Frazione Volume", f"{res.volume_fraction*100:.1f}%")
-    m4.metric("Tempo", f"{res.execution_time_sec:.1f}s")
+    m4.metric("Tempo Calcolo", f"{res.execution_time_sec:.1f}s")
 
     if res.stresses is not None:
         s1, s2, s3 = st.columns(3)
@@ -737,8 +774,8 @@ if has_result:
         s3_min = res.stresses.get("sigma_III", np.array([0.0]))
         s1_max = res.stresses.get("sigma_I", np.array([0.0]))
         s1.metric("Max Von Mises", f"{float(np.max(vm)):.2f} MPa")
-        s2.metric("Min σ_III (Compressione)", f"{float(np.min(s3_min)):.2f} MPa")
-        s3.metric("Max σ_I (Trazione)", f"{float(np.max(s1_max)):.2f} MPa")
+        s2.metric("Picco Compressione (σ_III)", f"{float(np.min(s3_min)):.2f} MPa")
+        s3.metric("Picco Trazione (σ_I)", f"{float(np.max(s1_max)):.2f} MPa")
 
     col_chart, col_stl = st.columns([1, 1])
 
@@ -768,23 +805,39 @@ if has_result:
             st.plotly_chart(fig_hist, use_container_width=True, config={"displayModeBar": False})
 
     with col_stl:
-        st.markdown('<div class="sec-head">Export STL Watertight</div>', unsafe_allow_html=True)
-        stl_t = st.slider("Soglia STL", 0.10, 0.90, 0.35, 0.05, key="stl_thresh")
-        if st.button("GENERATE STL", use_container_width=True):
-            tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
-            tmp_stl.close()
-            opt.export_stl(res, filepath=tmp_stl.name, threshold=stl_t)
+        st.markdown('<div class="sec-head">Esportazione STL (Watertight Manifold)</div>', unsafe_allow_html=True)
+        stl_t = st.slider("Soglia densità STL", 0.05, 0.90, 0.30, 0.05, key="stl_thresh")
+        
+        c_down1, c_down2 = st.columns(2)
+        with c_down1:
+            if st.button("GENERA STL LISCIO", use_container_width=True):
+                tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
+                tmp_stl.close()
+                opt.export_smooth_stl(res, filepath=tmp_stl.name, threshold=stl_t, smooth_iterations=10)
+                with open(tmp_stl.name, "rb") as f:
+                    stl_bytes = f.read()
+                st.download_button(
+                    label="DOWNLOAD STL LISCIO",
+                    data=stl_bytes,
+                    file_name=f"CE_3D_Smooth_{nelx}x{nely}x{nelz}.stl",
+                    mime="application/sla",
+                    use_container_width=True
+                )
 
-            with open(tmp_stl.name, "rb") as f:
-                stl_bytes = f.read()
-
-            st.download_button(
-                label="DOWNLOAD STL",
-                data=stl_bytes,
-                file_name=f"CE_3D_{nelx}x{nely}x{nelz}.stl",
-                mime="application/sla",
-                use_container_width=True
-            )
+        with c_down2:
+            if st.button("GENERA STL VOXEL", use_container_width=True):
+                tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
+                tmp_stl.close()
+                opt.export_stl(res, filepath=tmp_stl.name, threshold=stl_t)
+                with open(tmp_stl.name, "rb") as f:
+                    stl_bytes = f.read()
+                st.download_button(
+                    label="DOWNLOAD STL RAW",
+                    data=stl_bytes,
+                    file_name=f"CE_3D_Raw_{nelx}x{nely}x{nelz}.stl",
+                    mime="application/sla",
+                    use_container_width=True
+                )
 
     pdf_path = PROJECT_ROOT / "docs" / "TO_3D_log.pdf"
     if pdf_path.exists():

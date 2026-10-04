@@ -99,7 +99,7 @@ where each $6 \times 3$ nodal submatrix $\mathbf{B}_i$ is defined as:
 \end{bmatrix}
 \end{equation}
 
-\subsection{Element Stiffness Matrix $\mathbf{k}_0$ ($24 \times 24$)}
+\subsection{Element Stiffness Matrix \texorpdfstring{$\mathbf{k}_0$}{k\_0} ($24 \times 24$)}
 For isotropic 3D linear elasticity characterized by Young's modulus $E_0$ and Poisson's ratio $\nu$, the constitutive matrix $\mathbf{D} \in \mathbb{R}^{6 \times 6}$ is:
 \begin{equation}
 \mathbf{D} = \frac{E_0}{(1+\nu)(1-2\nu)} \begin{bmatrix}
@@ -144,6 +144,49 @@ where the six constant $24 \times 24$ geometric stiffness basis matrices are def
 \end{equation}
 \textbf{Computational Advantage:} Because all six basis matrices $\mathbf{G}_{0, k}$ depend solely on element dimensions $(dx, dy, dz)$, they are precomputed \textbf{exactly once} during initialization. Inside the optimization iterations, element geometric stiffness is formed by simple scalar multiplication, accelerating assembly by more than two orders of magnitude.
 
+\section{Principal Stress Decomposition: Signed Stress Metric for Tension and Compression}
+At each hexahedral element $e$, the centroidal engineering strain $\boldsymbol{\varepsilon}_e = \mathbf{B}(0,0,0) \mathbf{u}_e$ yields the elemental Cauchy stress tensor $\boldsymbol{\sigma}_e \in \mathbb{R}^{3 \times 3}$:
+\begin{equation}
+\boldsymbol{\sigma}_e = \begin{bmatrix}
+\sigma_{xx} & \tau_{xy} & \tau_{xz} \\
+\tau_{xy} & \sigma_{yy} & \tau_{yz} \\
+\tau_{xz} & \tau_{yz} & \sigma_{zz}
+\end{bmatrix}
+\end{equation}
+Because $\boldsymbol{\sigma}_e$ is real and symmetric ($\boldsymbol{\sigma}_e = \boldsymbol{\sigma}_e^T$), the spectral theorem guarantees the existence of three real eigenvalues and a mutually orthogonal triad of principal unit vectors $\{\mathbf{n}_I, \mathbf{n}_{II}, \mathbf{n}_{III}\}$. The stress tensor admits the spectral decomposition:
+\begin{equation}
+\boldsymbol{\sigma}_e = \sum_{p \in \{I, II, III\}} \sigma_p \, \mathbf{n}_p \otimes \mathbf{n}_p = \mathbf{Q} \boldsymbol{\Lambda} \mathbf{Q}^T
+\end{equation}
+where $\mathbf{Q} = [\mathbf{n}_I, \mathbf{n}_{II}, \mathbf{n}_{III}] \in \mathrm{SO}(3)$ is the orthogonal transformation matrix, and the diagonal matrix is $\boldsymbol{\Lambda} = \operatorname{diag}(\sigma_I, \sigma_{II}, \sigma_{III})$. The principal stresses are algebraically ordered:
+\begin{equation}
+\sigma_I \ge \sigma_{II} \ge \sigma_{III}
+\end{equation}
+where $\sigma_I$ denotes the maximum principal tensile stress, $\sigma_{III}$ denotes the maximum compressive stress (the most negative eigenvalue), and $\sigma_{II}$ represents the intermediate principal stress.
+
+In classical structural analysis, scalar stress invariants such as the von Mises equivalent stress $\sigma_{\text{vM}}$:
+\begin{equation}
+\sigma_{\text{vM}} = \sqrt{\frac{1}{2} \left[ (\sigma_I - \sigma_{II})^2 + (\sigma_{II} - \sigma_{III})^2 + (\sigma_{III} - \sigma_I)^2 \right]} \ge 0
+\end{equation}
+are strictly non-negative and blind to hydrostatic sign reversals. As a result, $\sigma_{\text{vM}}$ cannot distinguish between an intense tensile state and a severe compressive state.
+
+To resolve this limitation and distinguish tensile load paths from stability-critical members, we define the \textit{Signed Principal Stress} metric $\sigma_{\text{signed}}$:
+\begin{equation}
+\sigma_{\text{signed}} = \begin{cases} 
+\sigma_I & \text{if } |\sigma_I| \ge |\sigma_{III}| \\[6pt]
+\sigma_{III} & \text{if } |\sigma_{III}| > |\sigma_I| 
+\end{cases}
+\end{equation}
+This scalar field isolates the dominant principal stress magnitude while preserving its physical sign:
+\begin{itemize}
+    \item \textbf{Tensile Chords ($\sigma_{\text{signed}} > 0$):} Elements where $\sigma_{\text{signed}} > 0$ reside in a tensile stress regime governed by $\sigma_I$. Tensile forces induce positive-definite geometric stiffness contributions (stress stiffening), rendering tensile ties inherently stable against geometric bifurcation. Under combined compliance and stability optimization, these members can be realized as highly slender, direct tensile ties without incurring buckling penalties.
+    \item \textbf{Euler Buckling-Prone Compressive Chords ($\sigma_{\text{signed}} < 0$):} Elements where $\sigma_{\text{signed}} < 0$ are dominated by compressive stress ($\sigma_{III} < 0$). In accordance with Euler's critical buckling load formulation:
+    \begin{equation}
+    P_{\text{cr}} = \frac{\pi^2 E I}{(K L)^2}
+    \end{equation}
+    slender structural members subjected to compressive axial loads are prone to catastrophic elastic bifurcation instabilities at stress levels well below the material yield limit. The compressive eigenvalues in $\boldsymbol{\sigma}_e$ generate negative contributions to the geometric stiffness matrix $\mathbf{G}$, driving the structure toward geometric collapse ($\det(\mathbf{K} + \lambda \mathbf{G}) \to 0$).
+\end{itemize}
+By monitoring $\sigma_{\text{signed}}$ across the design domain, the topology optimization framework explicitly identifies compressive struts that require larger second moments of area $I$—motivating the formation of lateral bracing, webbed cross-sections, or thickened compressive arches—while permitting pure tension ties to remain slender.
+
 \section{Optimization Problem Setup}
 The spatial domain is discretized into $m$ equal elements. The pseudo-density field is defined as $\hat{\mathbf{x}} = \{\hat{x}_e\}_{e=1}^m \in [0, 1]^m$. Intermediate densities are filtered through a 3D spherical cone filter ($r_{\min}$) [2, 7]:
 \begin{equation}
@@ -178,7 +221,7 @@ To prevent singularities in void elements, the reciprocal eigenvalue $\mu_j = 1/
 \end{equation}
 where the fundamental critical buckling load factor is $\lambda_1 = 1/\mu_1$ with $\mu_1 = \max_j(\mu_j)$.
 
-\subsection{Multi-Objective Formulation and Dynamic $L_1$ Sensitivity Scaling}
+\subsection{Multi-Objective Formulation and Dynamic \texorpdfstring{$L_1$}{L1} Sensitivity Scaling}
 To balance stiffness maximization (minimizing compliance $C = \mathbf{F}^T \mathbf{U}$) and stability maximization (minimizing reciprocal eigenvalue $\mu_1$), the multi-objective problem is scalarized:
 \begin{equation}
 F(\mathbf{x}) = (1 - \alpha) C + \alpha \mu_1, \quad \alpha \in [0, 1]
@@ -193,6 +236,35 @@ The aggregated sensitivity passed to the optimizer is:
 \frac{\partial F^{(i)}}{\partial \hat{x}_e} = (1 - \alpha) \frac{1}{S_C^{(i)}} \frac{\partial C^{(i)}}{\partial \hat{x}_e} + \alpha \frac{1}{S_\mu^{(i)}} \frac{\partial \mu_1^{(i)}}{\partial \hat{x}_e}
 \end{equation}
 Under Geoffrion's theorem [10], dividing by positive scaling norms mathematically guarantees convergence to a properly efficient Pareto-optimal solution.
+
+\section{Accelerated Heaviside Continuation for Slender 3D Topologies}
+To transform intermediate densities into distinct $\{0, 1\}$ structural topologies, filtered densities $\tilde{x}_e$ are mapped through a smoothed Heaviside projection [8]:
+\begin{equation}
+\hat{x}_e = \frac{\tanh(\beta \eta) + \tanh(\beta (\tilde{x}_e - \eta))}{\tanh(\beta \eta) + \tanh(\beta (1 - \eta))}
+\end{equation}
+where $\eta \in (0, 1)$ is the threshold parameter (typically $\eta = 0.5$) and $\beta \in [1, \infty)$ dictates the sharpness of the transition interface.
+
+\subsection{Pathologies of Static Low \texorpdfstring{$\beta$}{beta} and Abrupt High \texorpdfstring{$\beta$}{beta}}
+The magnitude of $\beta$ governs the regularization of the step function. When $\beta$ is maintained at a low constant value ($\beta = 1$), the projection remains smooth and well-behaved, facilitating broad topological exploration. However, persistent low $\beta$ produces wide ``grey zones'' of intermediate density ($0 < \hat{x}_e < 1$) across element boundaries. In 3D linearized buckling optimization, extended grey zones distort the differential penalization ratio $E_G(\hat{x}_e) / E_K(\hat{x}_e)$, creating non-physical boundary compliance and obscuring localized structural bifurcation modes.
+
+Conversely, abruptly initializing or stepping to high $\beta$ (e.g., $\beta \ge 16$) causes severe gradient vanishing away from the threshold interface $\eta$:
+\begin{equation}
+\frac{\partial \hat{x}_e}{\partial \tilde{x}_e} = \frac{\beta \operatorname{sech}^2(\beta(\tilde{x}_e - \eta))}{\tanh(\beta \eta) + \tanh(\beta(1 - \eta))} \xrightarrow{|\tilde{x}_e - \eta| > \delta} 0
+\end{equation}
+This premature vanishing traps the design variables in sub-optimal local extrema, freezing chunky, stubby, and over-bulked structural members that fail to branch into slender, high-efficiency truss topologies.
+
+\subsection{Accelerated Continuation Formulation}
+To eliminate intermediate grey zones while simultaneously resolving slender structural features, an accelerated continuation schedule for $\beta$ is enforced:
+\begin{equation}
+\beta^{(k+1)} = \min\left( \beta_{\max}, \; \gamma_\beta \cdot \beta^{(k)} \right)
+\end{equation}
+where $\beta^{(0)} = 1$, $\gamma_\beta \in [1.5, 2.0]$ is the continuation multiplier (e.g., geometric doubling $\beta \in \{1, 2, 4, 8, 16, 32, 64\}$), and $\beta_{\max} = 32$ (or $64$). The continuation step is updated according to:
+\begin{equation}
+\text{Update } \beta \quad \text{if} \quad \left( k \pmod{\Delta N_\beta} = 0 \right) \quad \text{or} \quad \left( \|\mathbf{x}^{(k)} - \mathbf{x}^{(k - \Delta k)}\|_\infty < \epsilon_\beta \right)
+\end{equation}
+with update cadence $\Delta N_\beta \in [8, 12]$ iterations and convergence tolerance $\epsilon_\beta = 0.01$.
+
+During the initial phase ($\beta \le 4$), low projection steepness permits the continuous material to flow globally, establishing optimal structural connectivity between supports and loads. As the continuation accelerates $\beta$ into higher regimes ($\beta \ge 8$), the transition layer narrows sharply to the element width, forcing intermediate voxels strictly to 0 or 1. This rapid boundary sharpening eliminates grey zones and prevents the accumulation of chunky, stubby material blocks, compelling the optimizer to discover slender, high-aspect-ratio tensile ties and optimized triangulated compressive bracing.
 
 \section{Sensitivity Analysis}
 The compliance derivative is evaluated as [7]:
@@ -236,6 +308,58 @@ B_e = \sqrt{\max\left(0, \, -\frac{\partial \tilde{F} / \partial x_e}{\lambda_L 
 \end{equation}
 The volume Lagrange multiplier $\lambda_L$ is determined via bisection search until volume conservation $|\frac{1}{m}\sum_e \hat{x}_e - V_f| < 10^{-4}$ is satisfied.
 
+\section{Post-Processing: Discrete Surface Smoothing via Taubin Volume-Preserving Filtering}
+Upon convergence of the filtered and projected pseudo-density field $\hat{\mathbf{x}}^*$, an explicit geometric boundary of the structural topology is extracted at the discrete isosurface $\hat{x}_{\text{iso}} = 0.5$. In the Cartesian voxel framework, this is accomplished by traversing the computational grid to detect all external boundary quad facets separating solid voxels ($\hat{x}_e \ge 0.5$) from void voxels ($\hat{x}_e < 0.5$). Each rectangular quadrilateral facet is split along its shortest diagonal into two coplanar triangles, yielding an orientable, watertight 2-manifold triangular boundary mesh:
+\begin{equation}
+\mathcal{M} = (\mathcal{V}, \mathcal{F})
+\end{equation}
+parameterized by the vertex coordinate set $\mathcal{V} = \{\mathbf{v}_i \in \mathbb{R}^3\}_{i=1}^{N_v}$ and the triangular face connectivity set $\mathcal{F} = \{f_k\}_{k=1}^{N_f}$.
+
+Because the boundary mesh is extracted directly from orthogonal hexahedral cells, raw exported isosurfaces exhibit severe high-frequency voxel staircase artifacts. These microscopic discontinuities create spurious stress concentrations in downstream validation analyses and introduce unacceptable surface roughness for additive manufacturing and slicer toolpath generation.
+
+\subsection{Discrete Laplace-Beltrami Operator on 2-Manifold Boundary Meshes}
+Surface smoothing is formulated directly on the discrete graph structure of $\mathcal{M}$ through the discrete Laplace-Beltrami operator. For any boundary vertex $\mathbf{v}_i \in \mathcal{V}$, the discrete surface Laplacian $\Delta \mathbf{v}_i$ represents the vector displacement between $\mathbf{v}_i$ and the convex combination of its adjacent 1-ring neighbors:
+\begin{equation}
+\Delta \mathbf{v}_i = \sum_{j \in \mathcal{N}(i)} w_{ij} (\mathbf{v}_j - \mathbf{v}_i)
+\end{equation}
+where $\mathcal{N}(i) = \{j \in \mathcal{V} : (i, j) \in \mathcal{E}\}$ denotes the set of immediate topological neighbors connected to vertex $i$ by an edge in $\mathcal{E}$, and $w_{ij}$ are non-negative normalized edge weights satisfying the partition of unity:
+\begin{equation}
+\sum_{j \in \mathcal{N}(i)} w_{ij} = 1
+\end{equation}
+Under the discrete umbrella operator (uniform weighting), the weights are simply evaluated as:
+\begin{equation}
+w_{ij} = \frac{1}{|\mathcal{N}(i)|}
+\end{equation}
+where $|\mathcal{N}(i)|$ is the valence (degree) of vertex $\mathbf{v}_i$.
+
+\subsection{Volumetric Shrinkage of Classical Laplacian Smoothing}
+Classical Laplacian smoothing iteratively updates vertex coordinates through the forward Euler discretization of the isotropic surface heat diffusion equation $\partial \mathbf{v} / \partial t = \Delta \mathbf{v}$:
+\begin{equation}
+\mathbf{v}_i^{(k+1)} = \mathbf{v}_i^{(k)} + \lambda \Delta \mathbf{v}_i^{(k)}, \quad \lambda > 0
+\end{equation}
+While explicit Laplacian smoothing effectively damps high-frequency spatial noise, it acts as a low-pass Gaussian filter that induces severe global volume loss and geometric shrinkage. For slender structural members—such as thin tensile ties and delicate compressive trusses—repeated Laplacian iterations steadily erode cross-sectional dimensions, substantially shrinking the structural volume and degrading the buckling load capacity.
+
+\subsection{Dual-Step Taubin Volume-Preserving Smoothing Filter}
+To suppress high-frequency voxel staircase noise without shrinking the macroscopic volume or rounding slender structural chords, we incorporate the non-shrinking dual-step filter formulated by Taubin \cite{taubin1995}. Within each smoothing cycle $k \in \{0, 1, \dots, N_{\text{cycles}}-1\}$, the algorithm alternates between an inward diffusion step and an outward anti-diffusion step:
+\begin{align}
+\mathbf{v}_i^{(2k+1)} &= \mathbf{v}_i^{(2k)} + \lambda \Delta \mathbf{v}_i^{(2k)} \\
+\mathbf{v}_i^{(2k+2)} &= \mathbf{v}_i^{(2k+1)} + \mu \Delta \mathbf{v}_i^{(2k+1)}
+\end{align}
+with positive shrink parameter $\lambda > 0$ and negative unshrink parameter $\mu < -\lambda < 0$, satisfying the volume-preservation inequality:
+\begin{equation}
+\frac{1}{\lambda} + \frac{1}{\mu} < 0
+\end{equation}
+In the spectral domain of the discrete Laplace-Beltrami operator, with spatial frequency eigenvalues $k \in [0, k_{\max}]$ (where $k_{\max} \le 2$ on normalized meshes), the transfer function over a complete two-step iteration cycle is:
+\begin{equation}
+f(k) = (1 - \lambda k)(1 - \mu k) = 1 - (\lambda + \mu) k + \lambda \mu k^2
+\end{equation}
+The mathematical condition $\mu < -\lambda < 0$ and $\frac{1}{\lambda} + \frac{1}{\mu} < 0$ guarantees that:
+\begin{enumerate}
+    \item \textbf{Zero Low-Frequency Shrinkage:} At low spatial frequencies ($k \to 0$), the transfer function maintains unit gain ($f(0) = 1$) with positive slope $f'(0) = -(\lambda + \mu) > 0$. The anti-diffusive step ($\mu < 0$) counteracts the shrinkage induced by the positive diffusion step ($\lambda > 0$), perfectly stabilizing the global enclosed volume.
+    \item \textbf{Attenuation of High-Frequency Staircase Artifacts:} For high spatial frequencies $k \in (k_{\text{pass}}, 2]$, the magnitude of the transfer function satisfies $|f(k)| < 1$, ensuring monotonic damping of the Nyquist-frequency staircase artifacts associated with voxel edge discretization.
+\end{enumerate}
+In the production pipeline, stable filter parameters $\lambda = 0.50$ and $\mu = -0.53$ are applied over $N_{\text{cycles}} = 10 \text{--} 20$ iterations. This produces smooth, curvature-continuous, and volume-preserving 2-manifold triangular meshes that strictly preserve the mechanical stiffness, cross-sectional area, and Euler buckling resistance of slender 3D structural topologies.
+
 \section{Numerical Performance on 8GB Hardware}
 To guarantee execution on standard laptop hardware (AMD Ryzen 7 4700U with 8GB RAM), the solver employs:
 \begin{enumerate}
@@ -246,7 +370,8 @@ To guarantee execution on standard laptop hardware (AMD Ryzen 7 4700U with 8GB R
 
 \begin{table}[h!]
 \centering
-\small
+\footnotesize
+\setlength{\tabcolsep}{3pt}
 \caption{Memory scaling and performance across 3D voxel grid resolutions (Ryzen 7 4700U, 8GB RAM).}
 \vspace{4pt}
 \begin{tabular}{|cccccc|}
@@ -291,6 +416,9 @@ Das, I., \& Dennis, J. E. (1997). A closer look at drawbacks of minimizing weigh
 
 \bibitem{geoffrion1968}
 Geoffrion, A. M. (1968). Proper efficiency and the theory of vector maximization. \textit{Journal of Mathematical Analysis and Applications}, 22(3), 618--630.
+
+\bibitem{taubin1995}
+Taubin, G. (1995). Curve and surface smoothing without shrinkage. In \textit{Proceedings of IEEE International Conference on Computer Vision} (pp. 852--857). IEEE.
 \end{thebibliography}
 
 \end{document}
