@@ -222,9 +222,15 @@ To prevent singularities in void elements, the reciprocal eigenvalue $\mu_j = 1/
 where the fundamental critical buckling load factor is $\lambda_1 = 1/\mu_1$ with $\mu_1 = \max_j(\mu_j)$.
 
 \subsection{Multi-Objective Formulation and Dynamic \texorpdfstring{$L_1$}{L1} Sensitivity Scaling}
-To balance stiffness maximization (minimizing compliance $C = \mathbf{F}^T \mathbf{U}$) and stability maximization (minimizing reciprocal eigenvalue $\mu_1$), the multi-objective problem is scalarized:
+To ensure global static load bearing while simultaneously stiffening compressive members against buckling, we formulate the multi-objective optimization problem:
 \begin{equation}
-F(\mathbf{x}) = (1 - \alpha) C + \alpha \mu_1, \quad \alpha \in [0, 1]
+\min_{\mathbf{x}} \left\{ C(\hat{\mathbf{x}}), \, -\mu_1(\hat{\mathbf{x}}) \right\} \quad \text{subject to} \quad \frac{1}{m}\sum_{e=1}^m \hat{x}_e \le V_f
+\label{eq:multiobj_prob}
+\end{equation}
+Because these two objectives are competing, the solution space forms a Pareto-optimal frontier. We scalarize the problem into a combined objective function $F(\hat{\mathbf{x}})$ using the weighted sum method [3]:
+\begin{equation}
+F(\hat{\mathbf{x}}) = (1 - \alpha) C + \alpha \mu_1, \quad \alpha \in [0, 1]
+\label{eq:scalarized_obj}
 \end{equation}
 Because compliance and eigenvalue sensitivities differ by orders of magnitude, we implement adaptive dynamic sensitivity scaling. At each iteration $i$, scaling factors $S_C^{(i)}$ and $S_\mu^{(i)}$ are evaluated as the mean absolute values ($L_1$-norms) of the raw gradients:
 \begin{equation}
