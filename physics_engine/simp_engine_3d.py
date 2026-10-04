@@ -414,33 +414,33 @@ class SIMPResult3D:
         directions = [
             ('x-', lambda iz, iy, ix: [
                 [ix*dx, iy*dy,       iz*dz],
-                [ix*dx, (iy+1)*dy,   iz*dz],
-                [ix*dx, (iy+1)*dy,   (iz+1)*dz],
                 [ix*dx, iy*dy,       (iz+1)*dz],
+                [ix*dx, (iy+1)*dy,   (iz+1)*dz],
+                [ix*dx, (iy+1)*dy,   iz*dz],
             ]),
             ('x+', lambda iz, iy, ix: [
                 [(ix+1)*dx, iy*dy,       iz*dz],
-                [(ix+1)*dx, iy*dy,       (iz+1)*dz],
-                [(ix+1)*dx, (iy+1)*dy,   (iz+1)*dz],
                 [(ix+1)*dx, (iy+1)*dy,   iz*dz],
+                [(ix+1)*dx, (iy+1)*dy,   (iz+1)*dz],
+                [(ix+1)*dx, iy*dy,       (iz+1)*dz],
             ]),
             ('y-', lambda iz, iy, ix: [
                 [ix*dx,       iy*dy, iz*dz],
-                [ix*dx,       iy*dy, (iz+1)*dz],
-                [(ix+1)*dx,   iy*dy, (iz+1)*dz],
                 [(ix+1)*dx,   iy*dy, iz*dz],
+                [(ix+1)*dx,   iy*dy, (iz+1)*dz],
+                [ix*dx,       iy*dy, (iz+1)*dz],
             ]),
             ('y+', lambda iz, iy, ix: [
                 [ix*dx,       (iy+1)*dy, iz*dz],
-                [(ix+1)*dx,   (iy+1)*dy, iz*dz],
-                [(ix+1)*dx,   (iy+1)*dy, (iz+1)*dz],
                 [ix*dx,       (iy+1)*dy, (iz+1)*dz],
+                [(ix+1)*dx,   (iy+1)*dy, (iz+1)*dz],
+                [(ix+1)*dx,   (iy+1)*dy, iz*dz],
             ]),
             ('z-', lambda iz, iy, ix: [
                 [ix*dx,       iy*dy,       iz*dz],
-                [(ix+1)*dx,   iy*dy,       iz*dz],
-                [(ix+1)*dx,   (iy+1)*dy,   iz*dz],
                 [ix*dx,       (iy+1)*dy,   iz*dz],
+                [(ix+1)*dx,   (iy+1)*dy,   iz*dz],
+                [(ix+1)*dx,   iy*dy,       iz*dz],
             ]),
             ('z+', lambda iz, iy, ix: [
                 [ix*dx,       iy*dy,       (iz+1)*dz],
@@ -481,8 +481,8 @@ class SIMPResult3D:
             mesh = mesh.subdivide()
 
         if smooth_iterations > 0 and len(mesh.vertices) > 0:
-            # Volume-preserving Taubin smoothing (does not shrink the structure)
-            trimesh.smoothing.filter_taubin(mesh, lamb=0.5, nu=-0.53, iterations=int(smooth_iterations))
+            # Stable volume-preserving Taubin smoothing (canonical parameters lambda=0.33, nu=-0.34)
+            trimesh.smoothing.filter_taubin(mesh, lamb=0.33, nu=-0.34, iterations=int(smooth_iterations))
 
         return mesh
 

@@ -387,10 +387,15 @@ def build_domain_preview_figure(
                 if view_mode == "tension_compression" and res.stresses is not None and "sigma_signed" in res.stresses:
                     # Map signed stress to vertices (positive = tension/red, negative = compression/blue)
                     s_signed = res.stresses["sigma_signed"]
-                    ix = np.clip((vx / dx).astype(int), 0, nelx - 1)
-                    iy = np.clip((vy / dy).astype(int), 0, nely - 1)
-                    iz = np.clip((vz / dz).astype(int), 0, nelz - 1)
-                    v_stress = s_signed[iz, iy, ix]
+                    try:
+                        from scipy.ndimage import map_coordinates
+                        coords = np.array([vz / dz - 0.5, vy / dy - 0.5, vx / dx - 0.5])
+                        v_stress = map_coordinates(s_signed, coords, order=1, mode='nearest')
+                    except Exception:
+                        ix = np.clip(np.floor(vx / dx).astype(int), 0, nelx - 1)
+                        iy = np.clip(np.floor(vy / dy).astype(int), 0, nely - 1)
+                        iz = np.clip(np.floor(vz / dz).astype(int), 0, nelz - 1)
+                        v_stress = s_signed[iz, iy, ix]
                     max_abs = float(np.max(np.abs(v_stress)))
                     if max_abs < 1e-6:
                         max_abs = 1.0
