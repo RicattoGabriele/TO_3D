@@ -555,6 +555,9 @@ Applying the chain rule through the constitutive relation $\boldsymbol{\sigma}_e
 \mathbf{F}_{\text{adj}, e} = E_G(\hat{x}_e) \mathbf{B}_0^T \mathbf{D}^T \mathbf{P}_e
 \label{eq:adjoint_elem_force}
 \end{equation}
+
+*(Note on Computational Implementation: In the Python codebase, this term is computed elegantly as `adj_L_e = (P_e @ (self.D @ self.B0)) * E_G[:, None]`. Because $\mathbf{P}_e$ is treated as a row vector in numpy matrix multiplication, the product $\mathbf{P}_e (\mathbf{D} \mathbf{B}_0)$ mathematically evaluates the exact transposition $(\mathbf{B}_0^T \mathbf{D}^T \mathbf{P}_e^T)^T$, avoiding costly explicit matrix transposes in the hot loop.)*
+
 where $\mathbf{P}_e \in \mathbb{R}^6$ collects the projections of the eigenvector onto the six basis matrices:
 \begin{equation}
 P_{e, k} = \boldsymbol{\phi}_{1, e}^T \mathbf{G}_{0, k} \boldsymbol{\phi}_{1, e}, \quad k \in \{xx, yy, zz, yz, xz, xy\}
@@ -826,3 +829,9 @@ In the interactive dashboard (`PicoGK_Dashboard/app.py`), the 3D structure is re
 [9] Das, I., & Dennis, J. E. (1997). A closer look at drawbacks of minimizing weighted sums of objectives for Pareto set generation in multicriteria optimization problems. *Structural Optimization*, 14(1), 63–69.
 
 [10] Geoffrion, A. M. (1968). Proper efficiency and the theory of vector maximization. *Journal of Mathematical Analysis and Applications*, 22(3), 618–630.
+
+
+### 1.3 Non-Design Spaces vs. Boundary Forcing
+In the context of SIMP formulation, forcing elements adjacent to kinematic boundary conditions (supports) or loads to full density (=1$) represents a computational flaw. This naive "boundary forcing" creates massive, artificial rigid bodies across the boundary domain (e.g., solidifying an entire face). These artificial plates improperly distribute stresses and artificially stiffen the structure. 
+
+Instead, the robust, commercially-aligned methodology relies on explicitly defined **Non-Design Spaces** (o Passive Solids). By strictly defining localized passive regions (e.g., bounding boxes representing required mounting brackets or bolt pads) and enforcing  = 1$ strictly within those subdomains, the optimizer naturally drives strain energy through the necessary load paths without artificial boundary stiffening. The mathematical solver inherently places material around boundary points subjected to high strain gradients, while regions lacking high gradients are naturally pruned by the optimization process.

@@ -34,9 +34,14 @@ st.markdown("""
     @import url('https://fonts.googleapis.com/css2?family=Inconsolata:wght@300;400;500;600&display=swap');
 
     /* Global Inconsolata 300 & Pure Black Canvas */
-    *, html, body, [class*="css"], .stApp, .stMarkdown, p, div, span, label, input, button, select {
-        font-family: 'Inconsolata', monospace !important;
-        font-weight: 300 !important;
+    html, body, .stApp, p, label, input, button, select, textarea {
+        font-family: 'Inconsolata', monospace;
+        font-weight: 300;
+    }
+
+    /* Let Streamlit's Material Icons handle their own font */
+    [class*="stIconMaterial"], .material-symbols-rounded {
+        font-family: 'Material Symbols Rounded', sans-serif !important;
     }
 
     .stApp {
@@ -59,9 +64,6 @@ st.markdown("""
     section[data-testid="stSidebar"] {
         background-color: #050505 !important;
         border-right: 1px solid #18181b !important;
-    }
-    section[data-testid="stSidebar"] * {
-        font-family: 'Inconsolata', monospace !important;
     }
 
     /* Section Headers */
@@ -253,6 +255,7 @@ def build_domain_preview_figure(
     dx: float, dy: float, dz: float,
     fixed_nodes_coords: List[Tuple[float, float, float, str]],
     applied_loads: List[Tuple[float, float, float, float, float, float]],
+    passive_boxes: List[Tuple[float, float, float, float, float, float]] = None,
     res: Optional[SIMPResult3D] = None,
     threshold: float = 0.35,
     view_mode: str = "preview",
@@ -299,6 +302,22 @@ def build_domain_preview_figure(
         hoverinfo="skip",
         showlegend=False
     ))
+
+    # Render Passive Regions (Non-Design Spaces)
+    if passive_boxes:
+        for (xmin, xmax, ymin, ymax, zmin, zmax) in passive_boxes:
+            bx = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
+            by = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
+            bz = [zmin, zmin, zmin, zmin, zmax, zmax, zmax, zmax]
+            fig.add_trace(go.Mesh3d(
+                x=bx, y=by, z=bz,
+                alphahull=0,
+                color='yellow',
+                opacity=0.3,
+                showlegend=False,
+                hoverinfo='skip',
+                name='Non-Design Space'
+            ))
 
     # Faint domain shading
     fig.add_trace(go.Mesh3d(
@@ -457,27 +476,30 @@ def build_domain_preview_figure(
         plot_bgcolor="#000000",
         scene=dict(
             xaxis=dict(
-                title=dict(text="X (mm)", font=dict(color="#71717a", size=10, family="Inconsolata")),
-                tickfont=dict(color="#52525b", size=8, family="Inconsolata"),
+                title=dict(text="X (mm)", font=dict(color="#71717a", size=16, family="Inconsolata")),
+                tickfont=dict(color="#a1a1aa", size=11, family="Inconsolata"),
                 backgroundcolor="#000000",
-                gridcolor="#18181b",
-                zerolinecolor="#27272a",
+                gridcolor="#27272a",
+                zerolinecolor="#52525b",
+                zerolinewidth=2,
                 range=[-0.05 * Lx, 1.15 * Lx]
             ),
             yaxis=dict(
-                title=dict(text="Y (mm)", font=dict(color="#71717a", size=10, family="Inconsolata")),
-                tickfont=dict(color="#52525b", size=8, family="Inconsolata"),
+                title=dict(text="Y (mm)", font=dict(color="#71717a", size=16, family="Inconsolata")),
+                tickfont=dict(color="#a1a1aa", size=11, family="Inconsolata"),
                 backgroundcolor="#000000",
-                gridcolor="#18181b",
-                zerolinecolor="#27272a",
+                gridcolor="#27272a",
+                zerolinecolor="#52525b",
+                zerolinewidth=2,
                 range=[-0.05 * Ly, 1.15 * Ly]
             ),
             zaxis=dict(
-                title=dict(text="Z (mm)", font=dict(color="#71717a", size=10, family="Inconsolata")),
-                tickfont=dict(color="#52525b", size=8, family="Inconsolata"),
+                title=dict(text="Z (mm)", font=dict(color="#71717a", size=16, family="Inconsolata")),
+                tickfont=dict(color="#a1a1aa", size=11, family="Inconsolata"),
                 backgroundcolor="#000000",
-                gridcolor="#18181b",
-                zerolinecolor="#27272a",
+                gridcolor="#27272a",
+                zerolinecolor="#52525b",
+                zerolinewidth=2,
                 range=[-0.05 * Lz, 1.15 * Lz]
             ),
             aspectmode="data",
@@ -562,11 +584,11 @@ with st.sidebar:
                 for j_idx in range(0, nely + 1, max(1, nely // 3)):
                     for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
                         custom_supports.append((Lx, j_idx * dy, k_idx * dz, desc_str))
-            elif face_name == "bottom":
+            elif face_name in ["bottom", "down"]:
                 for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
                     for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
                         custom_supports.append((i_idx * dx, 0.0, k_idx * dz, desc_str))
-            elif face_name == "top":
+            elif face_name in ["top", "up"]:
                 for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
                     for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
                         custom_supports.append((i_idx * dx, Ly, k_idx * dz, desc_str))
@@ -623,7 +645,30 @@ with st.sidebar:
                 applied_loads.append((float(x), float(y), float(z), fx, fy, fz))
             except: pass
 
-    st.markdown('<div class="sec-head">4. PARAMETERS</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-head">4. NON-DESIGN REGIONS (SOLID)</div>', unsafe_allow_html=True)
+    default_passive = "# BOX X1 X2 Y1 Y2 Z1 Z2\n"
+    passive_text = st.text_area("Force density to 1.0 in these regions:", default_passive, height=80, key="passive_txt")
+    
+    parsed_passive = []
+    for line in passive_text.strip().split('\n'):
+        line = line.split('#')[0].strip().upper()
+        if not line: continue
+        parts = line.split()
+        if parts[0] == "BOX" and len(parts) >= 7:
+            try:
+                x1 = eval(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                x2 = eval(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                y1 = eval(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                y2 = eval(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                z1 = eval(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                z2 = eval(parts[6].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                xmin, xmax = min(float(x1), float(x2)), max(float(x1), float(x2))
+                ymin, ymax = min(float(y1), float(y2)), max(float(y1), float(y2))
+                zmin, zmax = min(float(z1), float(z2)), max(float(z1), float(z2))
+                parsed_passive.append((xmin, xmax, ymin, ymax, zmin, zmax))
+            except: pass
+
+    st.markdown('<div class="sec-head">5. PARAMETERS</div>', unsafe_allow_html=True)
     volfrac = st.slider("Volume (Vf)", 0.05, 0.80, 0.20, 0.05)
     alpha = st.slider("Buckling (α)", 0.00, 0.90, 0.30, 0.05)
     rmin = st.slider("Filter (Rmin)", 0.5, 6.0, 1.2, 0.1)
@@ -683,6 +728,9 @@ if run_btn:
         node_j = int(np.clip(round(ly / dy), 0, nely))
         node_k = int(np.clip(round(lz / dz), 0, nelz))
         opt.add_load(node_i, node_j, node_k, fx=fx, fy=fy, fz=fz)
+        
+    for box in parsed_passive:
+        opt.add_passive_box(*box, dx, dy, dz)
 
     def on_progress(it, max_it, comp=0.0, vol=0.0, *args):
         pct = int((it / max_it) * 100)
@@ -745,6 +793,7 @@ preview_fig = build_domain_preview_figure(
     dx=dx, dy=dy, dz=dz,
     fixed_nodes_coords=custom_supports,
     applied_loads=applied_loads,
+    passive_boxes=parsed_passive,
     res=st.session_state.get("res3d", None),
     threshold=threshold_val,
     view_mode=view_choice if has_result else "preview",

@@ -423,6 +423,9 @@ class SIMPOptimizer3D:
         # 5. Boundary Condition Storage
         self.fixed_dofs: Set[int] = set()
         self.force_vector = np.zeros(self.num_dofs, dtype=np.float64)
+        
+        # Non-Design Spaces
+        self.passive_solid = np.zeros(self.num_elements, dtype=bool)
 
     def _build_edof_matrix(self) -> np.ndarray:
         """
@@ -463,6 +466,7 @@ class SIMPOptimizer3D:
         """Clears all fixed DOFs and applied forces."""
         self.fixed_dofs.clear()
         self.force_vector.fill(0.0)
+        self.passive_solid.fill(False)
 
     def fix_dof(self, dof: int):
         """Fix a single degree of freedom."""
@@ -494,11 +498,11 @@ class SIMPOptimizer3D:
             for j in range(self.nely + 1):
                 for k in range(self.nelz + 1):
                     self.fix_node(self.nelx, j, k, fix_x, fix_y, fix_z)
-        elif face == "bottom":
+        elif face in ["bottom", "down"]:
             for i in range(self.nelx + 1):
                 for k in range(self.nelz + 1):
                     self.fix_node(i, 0, k, fix_x, fix_y, fix_z)
-        elif face == "top":
+        elif face in ["top", "up"]:
             for i in range(self.nelx + 1):
                 for k in range(self.nelz + 1):
                     self.fix_node(i, self.nely, k, fix_x, fix_y, fix_z)
@@ -516,6 +520,20 @@ class SIMPOptimizer3D:
     def fix_wall(self, side: str = "left", fix_x: bool = True, fix_y: bool = True, fix_z: bool = True):
         """Compatibility alias for fix_face."""
         self.fix_face(face=side, fix_x=fix_x, fix_y=fix_y, fix_z=fix_z)
+
+
+    def add_passive_box(self, xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float, dx: float, dy: float, dz: float):
+        """Forces elements within the specified physical bounding box to be solid (x=1)."""
+        for elx in range(self.nelx):
+            for ely in range(self.nely):
+                for elz in range(self.nelz):
+                    # Element center coordinates
+                    cx = (elx + 0.5) * dx
+                    cy = (ely + 0.5) * dy
+                    cz = (elz + 0.5) * dz
+                    if xmin <= cx <= xmax and ymin <= cy <= ymax and zmin <= cz <= zmax:
+                        idx = self.element_id(elx, ely, elz)
+                        self.passive_solid[idx] = True
 
     def add_load(self, i: int, j: int, k: int, fx: float = 0.0, fy: float = 0.0, fz: float = 0.0):
         """Apply concentrated point load in Newtons to node (i, j, k)."""
@@ -670,6 +688,10 @@ class SIMPOptimizer3D:
 
         # 2. Design Variable Initialization
         x = np.full(self.num_elements, self.volfrac, dtype=np.float64)
+        
+        if np.any(self.passive_solid):
+            x[self.passive_solid] = 1.0
+
         xPhys = x.copy()
         u_free_prev = None
 
@@ -694,6 +716,8 @@ class SIMPOptimizer3D:
             x_tilde = (conv_x / self.kernel_normalizer).ravel()
 
             xPhys = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde - eta))) / denom
+            if np.any(self.passive_solid):
+                xPhys[self.passive_solid] = 1.0
 
             # 4. Global Elasticity Assembly (Memory-Efficient)
             E_elements = self.Emin + (xPhys ** self.penal) * (self.E0 - self.Emin)
@@ -841,11 +865,15 @@ class SIMPOptimizer3D:
                 lmid = 0.5 * (l1 + l2)
                 Be = np.sqrt(np.maximum(0.0, -dc_filtered / (lmid * dv_safe)))
                 xnew = np.clip(x * Be, np.maximum(0.001, x - move), np.minimum(1.0, x + move))
+                if np.any(self.passive_solid):
+                    xnew[self.passive_solid] = 1.0
 
                 xnew_grid = xnew.reshape((self.nelz, self.nely, self.nelx))
                 conv_new = ndimage.convolve(xnew_grid, self.kernel, mode='constant', cval=0.0)
                 x_tilde_new = (conv_new / self.kernel_normalizer).ravel()
                 xPhys_new = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde_new - eta))) / denom
+                if np.any(self.passive_solid):
+                    xPhys_new[self.passive_solid] = 1.0
 
                 if np.mean(xPhys_new) > self.volfrac:
                     l1 = lmid
