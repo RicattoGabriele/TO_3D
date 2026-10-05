@@ -272,115 +272,8 @@ class SIMPResult3D:
     def export_voxel_stl(self, filepath: str, threshold: float = 0.5) -> str:
         """
         Exports a watertight, manifold STL surface mesh from the 3D density matrix.
-
-        Extracts only the *boundary* faces of the solid voxel region — i.e., faces shared
-        between a solid voxel and an empty voxel (or domain boundary). This eliminates
-        all internal shared faces, producing a geometrically correct, non-self-intersecting
-        closed surface compatible with PicoGK / OpenVDB and all slicer software.
-
-        Density matrix layout: density_matrix[iz, iy, ix] (shape: [nelz, nely, nelx]).
-        Physical vertex positions:  x = ix * dx,  y = iy * dy,  z = iz * dz.
         """
-        import trimesh
-
-        solid = (self.density_matrix >= threshold)  # shape: (nelz, nely, nelx)
-        if not np.any(solid):
-            # Fall back to adaptive threshold to prevent empty mesh
-            solid = (self.density_matrix >= np.percentile(self.density_matrix, 50))
-            if not np.any(solid):
-                solid = np.ones_like(self.density_matrix, dtype=bool)
-
-        nz, ny, nx = solid.shape
-        dx, dy, dz = self.dx, self.dy, self.dz
-
-        # --- Boundary face extraction ---
-        # Pad with False on all 6 sides to handle domain boundaries uniformly
-        padded = np.pad(solid, 1, mode='constant', constant_values=False)
-
-        vertices_list: list[np.ndarray] = []
-        faces_list: list[np.ndarray] = []
-        v_offset = 0
-
-        # Face offsets in padded array per direction:
-        # For each axis and direction we compare solid[iz, iy, ix] with its neighbor.
-        # A face is emitted where solid is True and its neighbor is False.
-        directions = [
-            # (axis, shift, corner offsets for the quad face in physical space)
-            # X- face (ix neighbour at ix-1): normal -X
-            ('x-', lambda iz, iy, ix: [
-                [ix*dx, iy*dy,       iz*dz],
-                [ix*dx, (iy+1)*dy,   iz*dz],
-                [ix*dx, (iy+1)*dy,   (iz+1)*dz],
-                [ix*dx, iy*dy,       (iz+1)*dz],
-            ]),
-            # X+ face: normal +X
-            ('x+', lambda iz, iy, ix: [
-                [(ix+1)*dx, iy*dy,       iz*dz],
-                [(ix+1)*dx, iy*dy,       (iz+1)*dz],
-                [(ix+1)*dx, (iy+1)*dy,   (iz+1)*dz],
-                [(ix+1)*dx, (iy+1)*dy,   iz*dz],
-            ]),
-            # Y- face: normal -Y
-            ('y-', lambda iz, iy, ix: [
-                [ix*dx,       iy*dy, iz*dz],
-                [ix*dx,       iy*dy, (iz+1)*dz],
-                [(ix+1)*dx,   iy*dy, (iz+1)*dz],
-                [(ix+1)*dx,   iy*dy, iz*dz],
-            ]),
-            # Y+ face: normal +Y
-            ('y+', lambda iz, iy, ix: [
-                [ix*dx,       (iy+1)*dy, iz*dz],
-                [(ix+1)*dx,   (iy+1)*dy, iz*dz],
-                [(ix+1)*dx,   (iy+1)*dy, (iz+1)*dz],
-                [ix*dx,       (iy+1)*dy, (iz+1)*dz],
-            ]),
-            # Z- face: normal -Z
-            ('z-', lambda iz, iy, ix: [
-                [ix*dx,       iy*dy,       iz*dz],
-                [(ix+1)*dx,   iy*dy,       iz*dz],
-                [(ix+1)*dx,   (iy+1)*dy,   iz*dz],
-                [ix*dx,       (iy+1)*dy,   iz*dz],
-            ]),
-            # Z+ face: normal +Z
-            ('z+', lambda iz, iy, ix: [
-                [ix*dx,       iy*dy,       (iz+1)*dz],
-                [ix*dx,       (iy+1)*dy,   (iz+1)*dz],
-                [(ix+1)*dx,   (iy+1)*dy,   (iz+1)*dz],
-                [(ix+1)*dx,   iy*dy,       (iz+1)*dz],
-            ]),
-        ]
-
-        # Neighbor masks per direction (using padded array; padded coords = real + 1)
-        neighbor_masks = {
-            'x-': padded[1:nz+1, 1:ny+1, 0:nx],    # neighbor at ix-1
-            'x+': padded[1:nz+1, 1:ny+1, 2:nx+2],  # neighbor at ix+1
-            'y-': padded[1:nz+1, 0:ny,   1:nx+1],  # neighbor at iy-1
-            'y+': padded[1:nz+1, 2:ny+2, 1:nx+1],  # neighbor at iy+1
-            'z-': padded[0:nz,   1:ny+1, 1:nx+1],  # neighbor at iz-1
-            'z+': padded[2:nz+2, 1:ny+1, 1:nx+1],  # neighbor at iz+1
-        }
-
-        for dir_key, quad_fn in directions:
-            # Voxels that are solid AND whose neighbor in this direction is empty
-            boundary_mask = solid & ~neighbor_masks[dir_key]
-            iz_arr, iy_arr, ix_arr = np.where(boundary_mask)
-
-            for iz, iy, ix in zip(iz_arr, iy_arr, ix_arr):
-                quad = np.array(quad_fn(int(iz), int(iy), int(ix)), dtype=np.float64)
-                vertices_list.append(quad)
-                # Two triangles per quad
-                faces_list.append([v_offset, v_offset+1, v_offset+2])
-                faces_list.append([v_offset, v_offset+2, v_offset+3])
-                v_offset += 4
-
-        if not vertices_list:
-            # Empty result guard — return minimal valid STL
-            mesh = trimesh.creation.box()
-        else:
-            verts = np.vstack(vertices_list)
-            faces = np.array(faces_list, dtype=np.int32)
-            mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
-
+        mesh = self.get_boundary_mesh(threshold=threshold, smooth_iterations=0, subdivide=False)
         os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
         mesh.export(filepath)
         return filepath
@@ -392,99 +285,49 @@ class SIMPResult3D:
         subdivide: bool = False
     ):
         """
-        Extracts a closed watertight boundary mesh of the solid voxels with optional
-        subdivision and volume-preserving Taubin smoothing (non-shrinking).
+        Extracts a closed watertight boundary mesh of the solid voxels using
+        Marching Cubes on a smoothed density field, preventing topological spikes.
         """
         import trimesh
+        try:
+            from skimage import measure
+            import scipy.ndimage as ndimage
 
-        solid = (self.density_matrix >= threshold)
-        if not np.any(solid):
-            solid = (self.density_matrix >= np.percentile(self.density_matrix, 50))
-            if not np.any(solid):
-                solid = np.ones_like(self.density_matrix, dtype=bool)
+            # Smooth the density matrix slightly to eliminate non-manifold diagonal connections
+            density_smoothed = ndimage.gaussian_filter(self.density_matrix, sigma=0.8)
 
-        nz, ny, nx = solid.shape
-        dx, dy, dz = self.dx, self.dy, self.dz
-        padded = np.pad(solid, 1, mode='constant', constant_values=False)
+            # Pad the matrix with 0s to ensure the mesh is closed at the boundaries
+            padded = np.pad(density_smoothed, 1, mode='constant', constant_values=0.0)
 
-        vertices_list = []
-        faces_list = []
-        v_offset = 0
+            # Generate mesh from the smoothed field
+            verts, faces, normals, values = measure.marching_cubes(
+                padded, level=threshold,
+                spacing=(self.dz, self.dy, self.dx)
+            )
 
-        directions = [
-            ('x-', lambda iz, iy, ix: [
-                [ix*dx, iy*dy,       iz*dz],
-                [ix*dx, iy*dy,       (iz+1)*dz],
-                [ix*dx, (iy+1)*dy,   (iz+1)*dz],
-                [ix*dx, (iy+1)*dy,   iz*dz],
-            ]),
-            ('x+', lambda iz, iy, ix: [
-                [(ix+1)*dx, iy*dy,       iz*dz],
-                [(ix+1)*dx, (iy+1)*dy,   iz*dz],
-                [(ix+1)*dx, (iy+1)*dy,   (iz+1)*dz],
-                [(ix+1)*dx, iy*dy,       (iz+1)*dz],
-            ]),
-            ('y-', lambda iz, iy, ix: [
-                [ix*dx,       iy*dy, iz*dz],
-                [(ix+1)*dx,   iy*dy, iz*dz],
-                [(ix+1)*dx,   iy*dy, (iz+1)*dz],
-                [ix*dx,       iy*dy, (iz+1)*dz],
-            ]),
-            ('y+', lambda iz, iy, ix: [
-                [ix*dx,       (iy+1)*dy, iz*dz],
-                [ix*dx,       (iy+1)*dy, (iz+1)*dz],
-                [(ix+1)*dx,   (iy+1)*dy, (iz+1)*dz],
-                [(ix+1)*dx,   (iy+1)*dy, iz*dz],
-            ]),
-            ('z-', lambda iz, iy, ix: [
-                [ix*dx,       iy*dy,       iz*dz],
-                [ix*dx,       (iy+1)*dy,   iz*dz],
-                [(ix+1)*dx,   (iy+1)*dy,   iz*dz],
-                [(ix+1)*dx,   iy*dy,       iz*dz],
-            ]),
-            ('z+', lambda iz, iy, ix: [
-                [ix*dx,       iy*dy,       (iz+1)*dz],
-                [(ix+1)*dx,   iy*dy,       (iz+1)*dz],
-                [(ix+1)*dx,   (iy+1)*dy,   (iz+1)*dz],
-                [ix*dx,       (iy+1)*dy,   (iz+1)*dz],
-            ]),
-        ]
+            # Skimage returns vertices in (Z, Y, X) order based on the array layout.
+            # We must map back to X, Y, Z and shift by dx/2 to align with [0, Lx] bounding box.
+            vx = verts[:, 2] - self.dx / 2.0
+            vy = verts[:, 1] - self.dy / 2.0
+            vz = verts[:, 0] - self.dz / 2.0
+            verts_xyz = np.column_stack([vx, vy, vz])
 
-        neighbor_masks = {
-            'x-': padded[1:nz+1, 1:ny+1, 0:nx],
-            'x+': padded[1:nz+1, 1:ny+1, 2:nx+2],
-            'y-': padded[1:nz+1, 0:ny,   1:nx+1],
-            'y+': padded[1:nz+1, 2:ny+2, 1:nx+1],
-            'z-': padded[0:nz,   1:ny+1, 1:nx+1],
-            'z+': padded[2:nz+2, 1:ny+1, 1:nx+1],
-        }
+            # Create a clean manifold Trimesh object
+            mesh = trimesh.Trimesh(vertices=verts_xyz, faces=faces, process=True)
 
-        for dir_key, quad_fn in directions:
-            boundary_mask = solid & ~neighbor_masks[dir_key]
-            iz_arr, iy_arr, ix_arr = np.where(boundary_mask)
+            if subdivide and smooth_iterations > 0 and len(mesh.faces) < 40000:
+                mesh = mesh.subdivide()
 
-            for iz, iy, ix in zip(iz_arr, iy_arr, ix_arr):
-                quad = np.array(quad_fn(int(iz), int(iy), int(ix)), dtype=np.float64)
-                vertices_list.append(quad)
-                faces_list.append([v_offset, v_offset+1, v_offset+2])
-                faces_list.append([v_offset, v_offset+2, v_offset+3])
-                v_offset += 4
+            if smooth_iterations > 0 and len(mesh.vertices) > 0:
+                # Stable volume-preserving Taubin smoothing
+                trimesh.smoothing.filter_taubin(mesh, lamb=0.5, nu=-0.53, iterations=int(smooth_iterations))
 
-        if not vertices_list:
-            mesh = trimesh.creation.box()
-        else:
-            verts = np.vstack(vertices_list)
-            faces = np.array(faces_list, dtype=np.int32)
-            mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+            return mesh
 
-        if subdivide and smooth_iterations > 0 and len(mesh.faces) < 20000:
-            mesh = mesh.subdivide()
+        except ImportError:
+            # Fallback to simple box if scikit-image is not available
+            return trimesh.creation.box()
 
-        if smooth_iterations > 0 and len(mesh.vertices) > 0:
-            # Stable volume-preserving Taubin smoothing (canonical parameters lambda=0.33, nu=-0.34)
-            trimesh.smoothing.filter_taubin(mesh, lamb=0.33, nu=-0.34, iterations=int(smooth_iterations))
-
-        return mesh
 
     def export_smooth_stl(
         self,
@@ -581,6 +424,10 @@ class SIMPOptimizer3D:
         self.fixed_dofs: Set[int] = set()
         self.force_vector = np.zeros(self.num_dofs, dtype=np.float64)
 
+        # Non-Design Spaces
+        self.passive_solid = np.zeros(self.num_elements, dtype=bool)
+        self.passive_void = np.zeros(self.num_elements, dtype=bool)
+
     def _build_edof_matrix(self) -> np.ndarray:
         """
         Builds element degree-of-freedom mapping matrix of shape (num_elements, 24).
@@ -620,6 +467,8 @@ class SIMPOptimizer3D:
         """Clears all fixed DOFs and applied forces."""
         self.fixed_dofs.clear()
         self.force_vector.fill(0.0)
+        self.passive_solid.fill(False)
+        self.passive_void.fill(False)
 
     def fix_dof(self, dof: int):
         """Fix a single degree of freedom."""
@@ -651,11 +500,11 @@ class SIMPOptimizer3D:
             for j in range(self.nely + 1):
                 for k in range(self.nelz + 1):
                     self.fix_node(self.nelx, j, k, fix_x, fix_y, fix_z)
-        elif face == "bottom":
+        elif face in ["bottom", "down"]:
             for i in range(self.nelx + 1):
                 for k in range(self.nelz + 1):
                     self.fix_node(i, 0, k, fix_x, fix_y, fix_z)
-        elif face == "top":
+        elif face in ["top", "up"]:
             for i in range(self.nelx + 1):
                 for k in range(self.nelz + 1):
                     self.fix_node(i, self.nely, k, fix_x, fix_y, fix_z)
@@ -673,6 +522,33 @@ class SIMPOptimizer3D:
     def fix_wall(self, side: str = "left", fix_x: bool = True, fix_y: bool = True, fix_z: bool = True):
         """Compatibility alias for fix_face."""
         self.fix_face(face=side, fix_x=fix_x, fix_y=fix_y, fix_z=fix_z)
+
+
+    def add_passive_box(self, xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float, dx: float, dy: float, dz: float):
+        """Forces elements within the specified physical bounding box to be solid (x=1)."""
+        for elx in range(self.nelx):
+            for ely in range(self.nely):
+                for elz in range(self.nelz):
+                    # Element center coordinates
+                    cx = (elx + 0.5) * dx
+                    cy = (ely + 0.5) * dy
+                    cz = (elz + 0.5) * dz
+                    if xmin <= cx <= xmax and ymin <= cy <= ymax and zmin <= cz <= zmax:
+                        idx = self.element_id(elx, ely, elz)
+                        self.passive_solid[idx] = True
+
+    def add_passive_void_box(self, xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float, dx: float, dy: float, dz: float):
+        """Forces elements within the specified physical bounding box to be void (x=0)."""
+        for elx in range(self.nelx):
+            for ely in range(self.nely):
+                for elz in range(self.nelz):
+                    # Element center coordinates
+                    cx = (elx + 0.5) * dx
+                    cy = (ely + 0.5) * dy
+                    cz = (elz + 0.5) * dz
+                    if xmin <= cx <= xmax and ymin <= cy <= ymax and zmin <= cz <= zmax:
+                        idx = self.element_id(elx, ely, elz)
+                        self.passive_void[idx] = True
 
     def add_load(self, i: int, j: int, k: int, fx: float = 0.0, fy: float = 0.0, fz: float = 0.0):
         """Apply concentrated point load in Newtons to node (i, j, k)."""
@@ -750,13 +626,15 @@ class SIMPOptimizer3D:
         sigma_signed = np.where(abs_s1 >= abs_s3, sigma_1, sigma_3)
         von_mises_signed = np.sign(sigma_signed) * von_mises
 
+        # Reshape all to 3D grid: (nelz, nely, nelx)
+        shape_3d = (self.nelz, self.nely, self.nelx)
         return {
-            "sigma_xx": s_xx, "sigma_yy": s_yy, "sigma_zz": s_zz,
-            "tau_yz": t_yz, "tau_xz": t_xz, "tau_xy": t_xy,
-            "sigma_I": sigma_1, "sigma_II": sigma_2, "sigma_III": sigma_3,
-            "sigma_signed": sigma_signed,
-            "von_mises": von_mises,
-            "von_mises_signed": von_mises_signed
+            "sigma_xx": s_xx.reshape(shape_3d), "sigma_yy": s_yy.reshape(shape_3d), "sigma_zz": s_zz.reshape(shape_3d),
+            "tau_yz": t_yz.reshape(shape_3d), "tau_xz": t_xz.reshape(shape_3d), "tau_xy": t_xy.reshape(shape_3d),
+            "sigma_I": sigma_1.reshape(shape_3d), "sigma_II": sigma_2.reshape(shape_3d), "sigma_III": sigma_3.reshape(shape_3d),
+            "sigma_signed": sigma_signed.reshape(shape_3d),
+            "von_mises": von_mises.reshape(shape_3d),
+            "von_mises_signed": von_mises_signed.reshape(shape_3d)
         }
 
     def solve(
@@ -825,6 +703,12 @@ class SIMPOptimizer3D:
 
         # 2. Design Variable Initialization
         x = np.full(self.num_elements, self.volfrac, dtype=np.float64)
+
+        if np.any(self.passive_solid):
+            x[self.passive_solid] = 1.0
+        if np.any(self.passive_void):
+            x[self.passive_void] = 0.001
+
         xPhys = x.copy()
         u_free_prev = None
 
@@ -849,10 +733,19 @@ class SIMPOptimizer3D:
             x_tilde = (conv_x / self.kernel_normalizer).ravel()
 
             xPhys = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde - eta))) / denom
+            if np.any(self.passive_solid):
+                xPhys[self.passive_solid] = 1.0
+            if np.any(self.passive_void):
+                xPhys[self.passive_void] = 0.001
 
-            # 4. Global Elasticity Assembly
+            # 4. Global Elasticity Assembly (Memory-Efficient)
             E_elements = self.Emin + (xPhys ** self.penal) * (self.E0 - self.Emin)
-            sK = np.outer(E_elements, self.k0.ravel()).ravel()
+
+            # Avoid np.outer which allocates a massive (num_elements, 576) intermediate matrix
+            sK = np.empty(self.num_elements * 576, dtype=np.float64)
+            k0_flat = self.k0.ravel()
+            for i in range(576):
+                sK[i::576] = E_elements * k0_flat[i]
 
             K_full = sp.coo_matrix((sK, (self.iK, self.jK)), shape=(self.num_dofs, self.num_dofs)).tocsr()
             K_free = K_full[free_dofs, :][:, free_dofs]
@@ -891,11 +784,15 @@ class SIMPOptimizer3D:
                 sigma_all = U_e @ self.DB0_T  # shape (num_elements, 6)
                 E_G = self.E0 * (xPhys ** self.penal_g)
 
-                Ge_flat = np.zeros((self.num_elements, 576), dtype=np.float64)
+                # Memory-efficient geometric stiffness assembly avoiding massive 2D arrays
+                sG = np.zeros(self.num_elements * 576, dtype=np.float64)
                 for k in range(6):
-                    Ge_flat += np.outer(sigma_all[:, k] * E_G, self.G0_bases_arr[k].ravel())
+                    basis_flat = self.G0_bases_arr[k].ravel()
+                    term = sigma_all[:, k] * E_G
+                    for i in range(576):
+                        if basis_flat[i] != 0.0:
+                            sG[i::576] += term * basis_flat[i]
 
-                sG = Ge_flat.ravel()
                 G_full = sp.coo_matrix((sG, (self.iK, self.jK)), shape=(self.num_dofs, self.num_dofs)).tocsr()
                 G_free = G_full[free_dofs, :][:, free_dofs]
 
@@ -987,11 +884,19 @@ class SIMPOptimizer3D:
                 lmid = 0.5 * (l1 + l2)
                 Be = np.sqrt(np.maximum(0.0, -dc_filtered / (lmid * dv_safe)))
                 xnew = np.clip(x * Be, np.maximum(0.001, x - move), np.minimum(1.0, x + move))
+                if np.any(self.passive_solid):
+                    xnew[self.passive_solid] = 1.0
+                if np.any(self.passive_void):
+                    xnew[self.passive_void] = 0.001
 
                 xnew_grid = xnew.reshape((self.nelz, self.nely, self.nelx))
                 conv_new = ndimage.convolve(xnew_grid, self.kernel, mode='constant', cval=0.0)
                 x_tilde_new = (conv_new / self.kernel_normalizer).ravel()
                 xPhys_new = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde_new - eta))) / denom
+                if np.any(self.passive_solid):
+                    xPhys_new[self.passive_solid] = 1.0
+                if np.any(self.passive_void):
+                    xPhys_new[self.passive_void] = 0.001
 
                 if np.mean(xPhys_new) > self.volfrac:
                     l1 = lmid
