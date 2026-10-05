@@ -378,13 +378,13 @@ def build_domain_preview_figure(
             ))
 
     # 4. Topology Mesh (Exact Watertight CAD Faces via Trimesh Extraction + Taubin Smoothing)
-    if res is not None and view_mode in ["tension_compression", "result", "cad"]:
+    if res is not None and view_mode in ["stress", "result", "cad"]:
         try:
             m = res.get_boundary_mesh(threshold=threshold, smooth_iterations=smooth_iterations)
             if len(m.vertices) > 0 and len(m.faces) > 0:
                 vx, vy, vz = m.vertices[:, 0], m.vertices[:, 1], m.vertices[:, 2]
 
-                if view_mode == "tension_compression" and res.stresses is not None and "sigma_signed" in res.stresses:
+                if view_mode == "stress" and res.stresses is not None and "sigma_signed" in res.stresses:
                     # Map signed stress to vertices (positive = tension/red, negative = compression/blue)
                     s_signed = res.stresses["sigma_signed"]
                     try:
@@ -396,9 +396,13 @@ def build_domain_preview_figure(
                         iy = np.clip(np.floor(vy / dy).astype(int), 0, nely - 1)
                         iz = np.clip(np.floor(vz / dz).astype(int), 0, nelz - 1)
                         v_stress = s_signed[iz, iy, ix]
-                    max_abs = float(np.max(np.abs(v_stress)))
-                    if max_abs < 1e-6:
-                        max_abs = 1.0
+                        
+                    # Robust color bounds (ignore top 2% singularities that wash out the map)
+                    p_98 = float(np.percentile(np.abs(v_stress), 98))
+                    max_abs = p_98 if p_98 > 1e-3 else 1.0
+                    
+                    # Clip values so that singularities cap out at the color edges
+                    v_stress = np.clip(v_stress, -max_abs, max_abs)
 
                     fig.add_trace(go.Mesh3d(
                         x=vx, y=vy, z=vz,
@@ -416,7 +420,7 @@ def build_domain_preview_figure(
                         opacity=0.98,
                         flatshading=(smooth_iterations == 0),
                         lighting=dict(ambient=0.5, diffuse=0.8, specular=0.2),
-                        name="Tension / Compression",
+                        name="Stress",
                         showlegend=False
                     ))
                 elif view_mode == "cad":
@@ -427,7 +431,7 @@ def build_domain_preview_figure(
                         opacity=0.96,
                         flatshading=(smooth_iterations == 0),
                         lighting=dict(ambient=0.45, diffuse=0.8, specular=0.25),
-                        name="CAD Surface",
+                        name="CAD",
                         showlegend=False
                     ))
                 else:
@@ -444,48 +448,7 @@ def build_domain_preview_figure(
         except Exception:
             pass
 
-    # 5. Thermal Stress Heatmap (High-Contrast Gradient on Solid Voxels)
-    if res is not None and view_mode == "stress" and res.stresses is not None:
-        stress_matrix = res.stresses.get(stress_field_key, res.stresses.get("von_mises"))
-        solid_mask = (res.density_matrix >= threshold)
-        iz_arr, iy_arr, ix_arr = np.where(solid_mask)
 
-        if len(ix_arr) > 0:
-            solid_x = (ix_arr + 0.5) * dx
-            solid_y = (iy_arr + 0.5) * dy
-            solid_z = (iz_arr + 0.5) * dz
-            solid_vals = stress_matrix[iz_arr, iy_arr, ix_arr]
-            solid_dens = res.density_matrix[iz_arr, iy_arr, ix_arr]
-
-            hover_texts = [
-                f"Voxel ({ix},{iy},{iz}) | ρ={rho:.2f}<br>{stress_field_name}: {val:.2f} MPa"
-                for ix, iy, iz, rho, val in zip(ix_arr, iy_arr, iz_arr, solid_dens, solid_vals)
-            ]
-
-            marker_sz = max(3, min(8, int(180 / max(nelx, nely, nelz))))
-
-            fig.add_trace(go.Scatter3d(
-                x=solid_x, y=solid_y, z=solid_z,
-                mode="markers",
-                marker=dict(
-                    size=marker_sz,
-                    color=solid_vals,
-                    colorscale=stress_colormap,
-                    colorbar=dict(
-                        title=dict(text=f"{stress_field_name} (MPa)", font=dict(color="#ffffff", size=9, family="Inconsolata")),
-                        tickfont=dict(color="#71717a", size=8, family="Inconsolata"),
-                        len=0.50,
-                        x=1.02
-                    ),
-                    showscale=True,
-                    symbol="square",
-                    opacity=0.95
-                ),
-                text=hover_texts,
-                hoverinfo="text",
-                name=stress_field_name,
-                showlegend=False
-            ))
 
     # Plotly Layout: Pitch Black Background, Minimalist Grid
     fig.update_layout(
@@ -536,7 +499,7 @@ def build_domain_preview_figure(
 with st.sidebar:
     st.markdown('<div style="font-size:1.1rem; font-weight:500; letter-spacing:0.18em; color:#ffffff; margin-bottom:0.8rem;">CE-3D</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="sec-head">1. Mesh & Dimensioni</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-head">1. MESH</div>', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     nelx = c1.number_input("nelx", min_value=4, max_value=80, value=20, step=2)
     nely = c2.number_input("nely", min_value=2, max_value=50, value=10, step=2)
@@ -551,77 +514,125 @@ with st.sidebar:
     Ly = nely * dy
     Lz = nelz * dz
 
-    st.markdown('<div class="sec-head">2. Vincoli</div>', unsafe_allow_html=True)
-    support_mode = st.radio(
-        "Vincoli:",
-        ["Incastro x=0", "Appoggio base", "Punto singolo"],
-        index=0,
-        label_visibility="collapsed"
-    )
+    st.markdown('<div class="sec-head">2. SUPPORTS</div>', unsafe_allow_html=True)
+    with st.expander("Syntax Guide", expanded=False):
+        st.markdown("""
+        **Supports:**
+        - `FACE <side> [UX UY UZ]`  
+          *(left, right, bottom, top, front, back)*
+        - `NODE X Y Z [UX UY UZ]`
+        - `BOX X1 X2 Y1 Y2 Z1 Z2 [UX UY UZ]`
+        
+        **Loads:**
+        - `LOAD X Y Z Fx Fy Fz`
+        
+        *Tip: You can use variables `Lx, Ly, Lz` and math (e.g., `Lx/2`).*
+        """)
+    default_supports = "FACE left\n# NODE X Y Z [UX UY UZ]\n# BOX X1 X2 Y1 Y2 Z1 Z2\n"
+    supports_text = st.text_area("Definitions (use Lx, Ly, Lz):", default_supports, height=120, key="sup_txt")
 
-    sup_x, sup_y, sup_z = 0.0, 0.0, 0.0
-    fix_u, fix_v, fix_w = True, True, True
     custom_supports: List[Tuple[float, float, float, str]] = []
+    parsed_supports = []
 
-    if support_mode == "Incastro x=0":
-        for j_idx in range(0, nely + 1, max(1, nely // 3)):
-            for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
-                custom_supports.append((0.0, j_idx * dy, k_idx * dz, "Ux, Uy, Uz"))
-    elif support_mode == "Appoggio base":
-        custom_supports.append((0.0, 0.0, 0.0, "Ux, Uy, Uz"))
-        custom_supports.append((0.0, 0.0, Lz, "Ux, Uy, Uz"))
-        custom_supports.append((Lx, 0.0, 0.0, "Uy, Uz"))
-        custom_supports.append((Lx, 0.0, Lz, "Uy, Uz"))
-    else:
-        col_sx, col_sy, col_sz = st.columns(3)
-        sup_x = col_sx.number_input("X (mm)", 0.0, float(Lx), 0.0, float(dx))
-        sup_y = col_sy.number_input("Y (mm)", 0.0, float(Ly), 0.0, float(dy))
-        sup_z = col_sz.number_input("Z (mm)", 0.0, float(Lz), 0.0, float(dz))
+    safe_dict = {"Lx": Lx, "Ly": Ly, "Lz": Lz}
+    
+    for line in supports_text.strip().split('\n'):
+        line = line.split('#')[0].strip().upper()
+        if not line: continue
+        parts = line.split()
+        cmd = parts[0]
+        
+        ux = "UX" in parts; uy = "UY" in parts; uz = "UZ" in parts
+        if not (ux or uy or uz): ux = uy = uz = True
+            
+        desc = []
+        if ux: desc.append("Ux")
+        if uy: desc.append("Uy")
+        if uz: desc.append("Uz")
+        desc_str = ", ".join(desc) if desc else "None"
+        
+        if cmd == "FACE" and len(parts) >= 2:
+            face_name = parts[1].lower()
+            parsed_supports.append(("FACE", face_name, ux, uy, uz))
+            if face_name == "left":
+                for j_idx in range(0, nely + 1, max(1, nely // 3)):
+                    for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
+                        custom_supports.append((0.0, j_idx * dy, k_idx * dz, desc_str))
+            elif face_name == "right":
+                for j_idx in range(0, nely + 1, max(1, nely // 3)):
+                    for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
+                        custom_supports.append((Lx, j_idx * dy, k_idx * dz, desc_str))
+            elif face_name == "bottom":
+                for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
+                    for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
+                        custom_supports.append((i_idx * dx, 0.0, k_idx * dz, desc_str))
+            elif face_name == "top":
+                for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
+                    for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
+                        custom_supports.append((i_idx * dx, Ly, k_idx * dz, desc_str))
+            elif face_name in ["front", "bottom_z"]:
+                for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
+                    for j_idx in range(0, nely + 1, max(1, nely // 3)):
+                        custom_supports.append((i_idx * dx, j_idx * dy, 0.0, desc_str))
+            elif face_name in ["back", "top_z"]:
+                for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
+                    for j_idx in range(0, nely + 1, max(1, nely // 3)):
+                        custom_supports.append((i_idx * dx, j_idx * dy, Lz, desc_str))
+                        
+        elif cmd == "NODE" and len(parts) >= 4:
+            try:
+                x = eval(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                y = eval(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                z = eval(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                parsed_supports.append(("NODE", float(x), float(y), float(z), ux, uy, uz))
+                custom_supports.append((float(x), float(y), float(z), desc_str))
+            except: pass
+            
+        elif cmd == "BOX" and len(parts) >= 7:
+            try:
+                x1 = eval(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                x2 = eval(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                y1 = eval(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                y2 = eval(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                z1 = eval(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                z2 = eval(parts[6].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                xmin, xmax = min(float(x1), float(x2)), max(float(x1), float(x2))
+                ymin, ymax = min(float(y1), float(y2)), max(float(y1), float(y2))
+                zmin, zmax = min(float(z1), float(z2)), max(float(z1), float(z2))
+                parsed_supports.append(("BOX", xmin, xmax, ymin, ymax, zmin, zmax, ux, uy, uz))
+                custom_supports.append((xmin, ymin, zmin, desc_str))
+                custom_supports.append((xmax, ymax, zmax, desc_str))
+            except: pass
 
-        cd1, cd2, cd3 = st.columns(3)
-        fix_u = cd1.checkbox("Ux", value=True)
-        fix_v = cd2.checkbox("Uy", value=True)
-        fix_w = cd3.checkbox("Uz", value=True)
-        dof_desc = []
-        if fix_u: dof_desc.append("Ux")
-        if fix_v: dof_desc.append("Uy")
-        if fix_w: dof_desc.append("Uz")
-        custom_supports.append((sup_x, sup_y, sup_z, ", ".join(dof_desc) if dof_desc else "None"))
-
-    st.markdown('<div class="sec-head">3. Carichi</div>', unsafe_allow_html=True)
-    load_mode = st.radio(
-        "Carichi:",
-        ["Carico estremità", "Carico puntuale"],
-        index=0,
-        label_visibility="collapsed"
-    )
+    st.markdown('<div class="sec-head">3. LOADS</div>', unsafe_allow_html=True)
+    default_loads = "LOAD Lx 0 Lz/2 0 -100 0\n# LOAD X Y Z FX FY FZ\n"
+    loads_text = st.text_area("Definitions (use Lx, Ly, Lz):", default_loads, height=80, key="load_txt")
 
     applied_loads: List[Tuple[float, float, float, float, float, float]] = []
-    if load_mode == "Carico estremità":
-        fy_mag = st.number_input("Fy (N)", value=-100.0, step=10.0)
-        applied_loads.append((Lx, 0.0, Lz / 2.0, 0.0, float(fy_mag), 0.0))
-    else:
-        cpx, cpy, cpz = st.columns(3)
-        lp_x = cpx.number_input("Pos X", 0.0, float(Lx), float(Lx), float(dx))
-        lp_y = cpy.number_input("Pos Y", 0.0, float(Ly), 0.0, float(dy))
-        lp_z = cpz.number_input("Pos Z", 0.0, float(Lz), float(Lz/2.0), float(dz))
+    
+    for line in loads_text.strip().split('\n'):
+        line = line.split('#')[0].strip().upper()
+        if not line: continue
+        parts = line.split()
+        if parts[0] == "LOAD" and len(parts) >= 7:
+            try:
+                x = eval(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                y = eval(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                z = eval(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                fx, fy, fz = float(parts[4]), float(parts[5]), float(parts[6])
+                applied_loads.append((float(x), float(y), float(z), fx, fy, fz))
+            except: pass
 
-        cfx, cfy, cfz = st.columns(3)
-        lf_x = cfx.number_input("Fx", value=0.0, step=10.0)
-        lf_y = cfy.number_input("Fy", value=-100.0, step=10.0)
-        lf_z = cfz.number_input("Fz", value=0.0, step=10.0)
-        applied_loads.append((lp_x, lp_y, lp_z, float(lf_x), float(lf_y), float(lf_z)))
-
-    st.markdown('<div class="sec-head">4. Parametri</div>', unsafe_allow_html=True)
-    volfrac = st.slider("Frazione volume (Vf)", 0.05, 0.80, 0.20, 0.05)
-    alpha = st.slider("Peso buckling (α)", 0.00, 0.90, 0.30, 0.05)
-    rmin = st.slider("Filtro r_min (mm)", 0.5, 6.0, 1.2, 0.1)
-    max_iter = st.slider("Iterazioni", 5, 80, 25, 5)
-    solver_opt = st.selectbox("Solutore", ["PCG + Jacobi", "Diretto"])
+    st.markdown('<div class="sec-head">4. PARAMETERS</div>', unsafe_allow_html=True)
+    volfrac = st.slider("Volume (Vf)", 0.05, 0.80, 0.20, 0.05)
+    alpha = st.slider("Buckling (α)", 0.00, 0.90, 0.30, 0.05)
+    rmin = st.slider("Filter (Rmin)", 0.5, 6.0, 1.2, 0.1)
+    max_iter = st.slider("Iterations", 5, 80, 25, 5)
+    solver_opt = st.selectbox("Solver", ["PCG + Jacobi", "Direct"])
     solver_key = "pcg" if "PCG" in solver_opt else "direct"
 
     st.write("")
-    run_btn = st.button("RUN OPTIMIZATION", type="primary", use_container_width=True)
+    run_btn = st.button("RUN", type="primary", use_container_width=True)
 
 
 # -----------------------------------------------------------------------------
@@ -632,7 +643,7 @@ status_holder = st.empty()
 
 if run_btn:
     progress_bar = progress_holder.progress(0)
-    status_holder.text("Inizializzazione elementi H8...")
+    status_holder.text("Initializing...")
 
     opt = SIMPOptimizer3D(
         nelx=int(nelx), nely=int(nely), nelz=int(nelz),
@@ -644,18 +655,27 @@ if run_btn:
     )
 
     # Boundaries
-    if support_mode == "Incastro x=0":
-        opt.fix_face("left", fix_x=True, fix_y=True, fix_z=True)
-    elif support_mode == "Appoggio base":
-        opt.fix_node(0, 0, 0, fix_x=True, fix_y=True, fix_z=True)
-        opt.fix_node(0, 0, nelz, fix_x=True, fix_y=True, fix_z=True)
-        opt.fix_node(nelx, 0, 0, fix_x=False, fix_y=True, fix_z=True)
-        opt.fix_node(nelx, 0, nelz, fix_x=False, fix_y=True, fix_z=True)
-    else:
-        node_i = int(np.clip(round(sup_x / dx), 0, nelx))
-        node_j = int(np.clip(round(sup_y / dy), 0, nely))
-        node_k = int(np.clip(round(sup_z / dz), 0, nelz))
-        opt.fix_node(node_i, node_j, node_k, fix_x=fix_u, fix_y=fix_v, fix_z=fix_w)
+    for sup in parsed_supports:
+        stype = sup[0]
+        if stype == "FACE":
+            opt.fix_face(sup[1], fix_x=sup[2], fix_y=sup[3], fix_z=sup[4])
+        elif stype == "NODE":
+            n_i = int(np.clip(round(sup[1] / dx), 0, nelx))
+            n_j = int(np.clip(round(sup[2] / dy), 0, nely))
+            n_k = int(np.clip(round(sup[3] / dz), 0, nelz))
+            opt.fix_node(n_i, n_j, n_k, fix_x=sup[4], fix_y=sup[5], fix_z=sup[6])
+        elif stype == "BOX":
+            xmin, xmax, ymin, ymax, zmin, zmax = sup[1], sup[2], sup[3], sup[4], sup[5], sup[6]
+            i_min = int(np.clip(round(xmin / dx), 0, nelx))
+            i_max = int(np.clip(round(xmax / dx), 0, nelx))
+            j_min = int(np.clip(round(ymin / dy), 0, nely))
+            j_max = int(np.clip(round(ymax / dy), 0, nely))
+            k_min = int(np.clip(round(zmin / dz), 0, nelz))
+            k_max = int(np.clip(round(zmax / dz), 0, nelz))
+            for i in range(i_min, i_max + 1):
+                for j in range(j_min, j_max + 1):
+                    for k in range(k_min, k_max + 1):
+                        opt.fix_node(i, j, k, fix_x=sup[7], fix_y=sup[8], fix_z=sup[9])
 
     # Loads
     for lx, ly, lz, fx, fy, fz in applied_loads:
@@ -667,7 +687,7 @@ if run_btn:
     def on_progress(it, max_it, comp=0.0, vol=0.0, *args):
         pct = int((it / max_it) * 100)
         progress_bar.progress(pct)
-        status_holder.text(f"Iterazione {it:02d}/{max_it:02d} | Compliance: {comp:.3e} | Vf: {vol*100:.1f}%")
+        status_holder.text(f"ITER {it:02d}/{max_it:02d} | C: {comp:.3e} | VF: {vol*100:.1f}%")
 
     mode = "buckling_max" if alpha > 0.0 else "compliance"
     start_time = time.time()
@@ -683,7 +703,7 @@ if run_btn:
     st.session_state["res3d"] = res
     st.session_state["opt3d"] = opt
     progress_holder.empty()
-    status_holder.text(f"Ottimizzazione completata in {res.iterations_run} iterazioni ({elapsed:.1f}s, RAM: {res.peak_memory_mb:.1f}MB)")
+    status_holder.text(f"DONE | ITER: {res.iterations_run} | TIME: {elapsed:.1f}s | RAM: {res.peak_memory_mb:.1f}MB")
 
 
 # -----------------------------------------------------------------------------
@@ -699,47 +719,25 @@ selected_stress_cmap = "Turbo"
 selected_stress_name = "Von Mises"
 
 if not has_result:
-    st.markdown(f'<div style="font-size:0.85rem; color:#71717a; margin-bottom:0.5rem; letter-spacing:0.05em;">DOMINIO 3D: {Lx:.1f} × {Ly:.1f} × {Lz:.1f} mm | {nelx}×{nely}×{nelz} elementi ({nelx*nely*nelz:,} voxel)</div>', unsafe_allow_html=True)
+    st.markdown(f'<div style="font-size:0.85rem; color:#71717a; margin-bottom:0.5rem; letter-spacing:0.05em;">DOMINIO 3D: {Lx:.1f} × {Ly:.1f} × {Lz:.1f} mm | {nelx}×{nely}×{nelz} elements ({nelx*nely*nelz:,} voxels)</div>', unsafe_allow_html=True)
 else:
     # Full Result Toolbar
     col_v1, col_v2, col_v3, col_v4 = st.columns([3, 2, 2, 1])
     view_choice = col_v1.radio(
-        "Modalità Vista:",
-        ["tension_compression", "cad", "stress", "preview"],
+        "VIEW",
+        ["stress", "cad"],
         index=0,
-        format_func=lambda x: "Trazione / Compressione" if x=="tension_compression" else ("Monocromatico CAD" if x=="cad" else ("Sforzi Termici" if x=="stress" else "Solo Dominio")),
+        format_func=lambda x: "STRESS" if x=="stress" else "CAD",
         horizontal=True,
         label_visibility="collapsed"
     )
-    threshold_val = col_v2.slider("Soglia densità", 0.05, 0.90, 0.30, 0.05)
-    smooth_val = col_v3.slider("Smoothing (Taubin)", 0, 15, 6, 1)
+    threshold_val = col_v2.slider("Threshold", 0.05, 0.90, 0.30, 0.05)
+    smooth_val = col_v3.slider("Smoothing", 0, 15, 6, 1)
     if col_v4.button("RESET", use_container_width=True):
         del st.session_state["res3d"]
         if "opt3d" in st.session_state:
             del st.session_state["opt3d"]
         st.rerun()
-
-    if view_choice == "stress":
-        sc1, sc2 = st.columns(2)
-        stress_label = sc1.selectbox(
-            "Componente Sforzo:",
-            [
-                "Von Mises",
-                "σ_III Minimo (Compressione)",
-                "σ_I Massimo (Trazione)",
-                "σ_xx", "σ_yy", "σ_zz"
-            ]
-        )
-        key_map = {
-            "Von Mises": ("von_mises", "Von Mises"),
-            "σ_III Minimo (Compressione)": ("sigma_III", "σ_III"),
-            "σ_I Massimo (Trazione)": ("sigma_I", "σ_I"),
-            "σ_xx": ("sigma_xx", "σ_xx"),
-            "σ_yy": ("sigma_yy", "σ_yy"),
-            "σ_zz": ("sigma_zz", "σ_zz")
-        }
-        selected_stress_key, selected_stress_name = key_map.get(stress_label, ("von_mises", "Von Mises"))
-        selected_stress_cmap = sc2.selectbox("Colormap:", ["Turbo", "Jet", "Inferno", "Plasma", "Hot"], index=0)
 
 # Render 3D Domain Figure (Plotly ModeBar hidden for clean view)
 preview_fig = build_domain_preview_figure(
@@ -765,13 +763,13 @@ if has_result:
     res = st.session_state["res3d"]
     opt = st.session_state["opt3d"]
 
-    st.markdown('<div class="sec-head">Risultati Ottimizzazione</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-head">RESULTS</div>', unsafe_allow_html=True)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Compliance", f"{res.compliance:.3e} N·mm")
     blf_str = f"{res.blf_history[-1]:.4f}" if res.blf_history else "N/A"
-    m2.metric("BLF Instabilità", blf_str)
-    m3.metric("Frazione Volume", f"{res.volume_fraction*100:.1f}%")
-    m4.metric("Tempo Calcolo", f"{res.execution_time_sec:.1f}s")
+    m2.metric("BLF", blf_str)
+    m3.metric("Volume", f"{res.volume_fraction*100:.1f}%")
+    m4.metric("Time", f"{res.execution_time_sec:.1f}s")
 
     if res.stresses is not None:
         s1, s2, s3 = st.columns(3)
@@ -779,8 +777,8 @@ if has_result:
         s3_min = res.stresses.get("sigma_III", np.array([0.0]))
         s1_max = res.stresses.get("sigma_I", np.array([0.0]))
         s1.metric("Max Von Mises", f"{float(np.max(vm)):.2f} MPa")
-        s2.metric("Picco Compressione (σ_III)", f"{float(np.min(s3_min)):.2f} MPa")
-        s3.metric("Picco Trazione (σ_I)", f"{float(np.max(s1_max)):.2f} MPa")
+        s2.metric("Min Comp (σ3)", f"{float(np.min(s3_min)):.2f} MPa")
+        s3.metric("Max Tens (σ1)", f"{float(np.max(s1_max)):.2f} MPa")
 
     col_chart, col_stl = st.columns([1, 1])
 
@@ -810,19 +808,19 @@ if has_result:
             st.plotly_chart(fig_hist, use_container_width=True, config={"displayModeBar": False})
 
     with col_stl:
-        st.markdown('<div class="sec-head">Esportazione STL (Watertight Manifold)</div>', unsafe_allow_html=True)
-        stl_t = st.slider("Soglia densità STL", 0.05, 0.90, 0.30, 0.05, key="stl_thresh")
+        st.markdown('<div class="sec-head">EXPORT</div>', unsafe_allow_html=True)
+        stl_t = st.slider("STL Threshold", 0.05, 0.90, 0.30, 0.05, key="stl_thresh")
         
         c_down1, c_down2 = st.columns(2)
         with c_down1:
-            if st.button("GENERA STL LISCIO", use_container_width=True):
+            if st.button("PREPARE SMOOTH STL", use_container_width=True):
                 tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
                 tmp_stl.close()
                 opt.export_smooth_stl(res, filepath=tmp_stl.name, threshold=stl_t, smooth_iterations=10)
                 with open(tmp_stl.name, "rb") as f:
                     stl_bytes = f.read()
                 st.download_button(
-                    label="DOWNLOAD STL LISCIO",
+                    label="DOWNLOAD SMOOTH",
                     data=stl_bytes,
                     file_name=f"CE_3D_Smooth_{nelx}x{nely}x{nelz}.stl",
                     mime="application/sla",
@@ -830,14 +828,14 @@ if has_result:
                 )
 
         with c_down2:
-            if st.button("GENERA STL VOXEL", use_container_width=True):
+            if st.button("PREPARE RAW STL", use_container_width=True):
                 tmp_stl = tempfile.NamedTemporaryFile(delete=False, suffix=".stl")
                 tmp_stl.close()
                 opt.export_stl(res, filepath=tmp_stl.name, threshold=stl_t)
                 with open(tmp_stl.name, "rb") as f:
                     stl_bytes = f.read()
                 st.download_button(
-                    label="DOWNLOAD STL RAW",
+                    label="DOWNLOAD RAW",
                     data=stl_bytes,
                     file_name=f"CE_3D_Raw_{nelx}x{nely}x{nelz}.stl",
                     mime="application/sla",
