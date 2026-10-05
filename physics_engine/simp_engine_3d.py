@@ -460,7 +460,7 @@ class SIMPOptimizer3D:
         self.kernel = spherical_cone_kernel(self.rmin, self.dx, self.dy, self.dz)
         ones_grid = np.ones((self.nelz, self.nely, self.nelx), dtype=np.float64)
         conv_ones = ndimage.convolve(ones_grid, self.kernel, mode='constant', cval=0.0)
-        self.kernel_normalizer = np.maximum(1e-12, conv_ones)
+        self.kernel_normalizer = np.maximum(1e-12, conv_ones).ravel()
 
         # 5. Boundary Condition Storage
         self.fixed_dofs: Set[int] = set()
@@ -700,7 +700,7 @@ class SIMPOptimizer3D:
 
             x_grid = x.reshape((self.nelz, self.nely, self.nelx))
             conv_x = ndimage.convolve(x_grid, self.kernel, mode='constant', cval=0.0)
-            x_tilde = (conv_x / self.kernel_normalizer).ravel()
+            x_tilde = (conv_x.ravel() / self.kernel_normalizer)
 
             xPhys = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde - eta))) / denom
 
@@ -825,12 +825,12 @@ class SIMPOptimizer3D:
             # 8. Sensitivity Filtering & Chain Rule Back-Propagation
             dxPhys_dxtilde = beta * (1.0 - np.tanh(beta * (x_tilde - eta))**2) / denom
 
-            q_obj = (sens_total * dxPhys_dxtilde).reshape((self.nelz, self.nely, self.nelx))
-            conv_q = ndimage.convolve(q_obj / self.kernel_normalizer, self.kernel, mode='constant', cval=0.0)
+            q_obj = ((sens_total * dxPhys_dxtilde) / self.kernel_normalizer).reshape((self.nelz, self.nely, self.nelx))
+            conv_q = ndimage.convolve(q_obj, self.kernel, mode='constant', cval=0.0)
             dc_filtered = conv_q.ravel()
 
-            q_vol = dxPhys_dxtilde.reshape((self.nelz, self.nely, self.nelx))
-            conv_v = ndimage.convolve(q_vol / self.kernel_normalizer, self.kernel, mode='constant', cval=0.0)
+            q_vol = (dxPhys_dxtilde / self.kernel_normalizer).reshape((self.nelz, self.nely, self.nelx))
+            conv_v = ndimage.convolve(q_vol, self.kernel, mode='constant', cval=0.0)
             dv_filtered = conv_v.ravel()
 
             # 9. Optimality Criteria (OC) Bisection Density Update
@@ -844,7 +844,7 @@ class SIMPOptimizer3D:
 
                 xnew_grid = xnew.reshape((self.nelz, self.nely, self.nelx))
                 conv_new = ndimage.convolve(xnew_grid, self.kernel, mode='constant', cval=0.0)
-                x_tilde_new = (conv_new / self.kernel_normalizer).ravel()
+                x_tilde_new = (conv_new.ravel() / self.kernel_normalizer)
                 xPhys_new = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde_new - eta))) / denom
 
                 if np.mean(xPhys_new) > self.volfrac:

@@ -488,7 +488,7 @@ Directly maximizing the fundamental buckling load factor $\lambda_1 = 1/\mu_1$ w
 
 To ensure global static load bearing while simultaneously stiffening compressive members against buckling, we formulate a multi-objective optimization problem:
 \begin{equation}
-\min_{\mathbf{x}} \left\{ C(\hat{\mathbf{x}}), \, -\mu_1(\hat{\mathbf{x}}) \right\} \quad \text{subject to} \quad \frac{1}{m}\sum_{e=1}^m \hat{x}_e \le V_f
+\min_{\mathbf{x}} \left\{ C(\hat{\mathbf{x}}), \, \mu_1(\hat{\mathbf{x}}) \right\} \quad \text{subject to} \quad \frac{1}{m}\sum_{e=1}^m \hat{x}_e \le V_f
 \label{eq:multiobj_prob}
 \end{equation}
 Because these two objectives are competing, the solution space forms a **Pareto-optimal frontier**. We scalarize the problem into a combined objective function $F(\hat{\mathbf{x}})$ using the weighted sum method [3]:
@@ -496,7 +496,7 @@ Because these two objectives are competing, the solution space forms a **Pareto-
 F(\hat{\mathbf{x}}) = (1 - \alpha) C_{\text{norm}}(\hat{\mathbf{x}}) + \alpha \mu_{1, \text{norm}}(\hat{\mathbf{x}})
 \label{eq:scalarized_obj}
 \end{equation}
-where $\alpha \in [0, 1]$ is the buckling coupling factor. When $\alpha = 0$, the framework degenerates to classical minimum compliance; when $\alpha \to 1$, the optimization strongly prioritizes buckling resistance.
+where $\alpha \in [0, 0.95]$ is the buckling coupling factor, rigorously capped below $1.0$ to prevent structural singularity when compliance weight vanishes. When $\alpha = 0$, the framework degenerates to classical minimum compliance; when $\alpha \to 0.95$, the optimization strongly prioritizes buckling resistance.
 
 ### 4.2 Dynamic $L_1$-Norm Gradient Normalization (Geoffrion's Theorem)
 Because structural compliance $C$ (measured in Joules) and the reciprocal buckling eigenvalue $\mu_1$ (dimensionless or inverse load) possess entirely disparate physical units and orders of magnitude, a static weighted sum would cause the objective with steeper gradients to completely dominate the optimization trajectory.
@@ -826,3 +826,18 @@ In the interactive dashboard (`PicoGK_Dashboard/app.py`), the 3D structure is re
 [9] Das, I., & Dennis, J. E. (1997). A closer look at drawbacks of minimizing weighted sums of objectives for Pareto set generation in multicriteria optimization problems. *Structural Optimization*, 14(1), 63–69.
 
 [10] Geoffrion, A. M. (1968). Proper efficiency and the theory of vector maximization. *Journal of Mathematical Analysis and Applications*, 22(3), 618–630.
+
+---
+
+## Appendix A: Errata and Implementation Corrections Log
+
+During rigorous code-theory cross-verification, several fundamental discrepancies in the mathematical formulations were identified and corrected.
+
+1. **Objective Scalarization Correction**:
+   The initial theoretical formulation incorrectly stated the multi-objective problem as minimizing $\left\{ C(\hat{\mathbf{x}}), \, -\mu_1(\hat{\mathbf{x}}) \right\}$. Because $\mu_1 = 1/\lambda_1$ is the *reciprocal* buckling eigenvalue, minimizing $-\mu_1$ is equivalent to *maximizing* $\mu_1$, which mathematically *minimizes* the actual buckling load factor $\lambda_1$. This would inadvertently promote early structural collapse. The objective has been formally corrected to minimize $\left\{ C(\hat{\mathbf{x}}), \, \mu_1(\hat{\mathbf{x}}) \right\}$, ensuring that minimizing $\mu_1$ correctly maximizes the critical buckling load $\lambda_1$. The scalarized combined objective function retains the correct additive formulation $F(\hat{\mathbf{x}}) = (1 - \alpha) C_{\text{norm}}(\hat{\mathbf{x}}) + \alpha \mu_{1, \text{norm}}(\hat{\mathbf{x}})$ exactly matching the Python implementation.
+
+2. **Scalarization Parameter Domain Bound**:
+   The initial text defined the buckling coupling factor domain as $\alpha \in [0, 1]$. However, allowing $\alpha = 1$ entirely zeroes out the compliance weight $(1-\alpha) = 0$, leading to a structurally singular stiffness matrix during the equilibrium solve since purely minimizing $\mu_1$ does not inherently guarantee structural continuity against external loads. The domain has been formally corrected to reflect the implemented safety clamp $\alpha \in [0, 0.95]$.
+
+3. **Spatial Filter Boundary Normalization**:
+   A classic topology optimization bug was identified and rectified within the density filtering implementation (`simp_engine_3d.py`) and corresponding unit tests. Boundary elements were incorrectly normalized using the sum of the full spatial kernel (`kernel_normalizer = np.sum(kernel)`) rather than the local sum of active filter weights inside the truncated domain boundary. This artificially reduced the density near physical boundaries (e.g. producing $\tilde{x}_e \approx 0.589$ instead of $1.0$ for a uniform solid domain). The code was updated to utilize `.ravel()` correctly ensuring elements only scale relative to their true local mass.

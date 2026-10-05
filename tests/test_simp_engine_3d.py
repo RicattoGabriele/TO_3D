@@ -157,7 +157,7 @@ class TestSIMPEngine3D(unittest.TestCase):
         opt = SIMPOptimizer3D(nelx=6, nely=6, nelz=6, rmin=1.5)
         ones_field = np.ones((6, 6, 6))
         conv_ones = ndimage.convolve(ones_field, opt.kernel, mode='constant', cval=0.0)
-        filtered = conv_ones / opt.kernel_normalizer
+        filtered = conv_ones.ravel() / opt.kernel_normalizer
 
         np.testing.assert_allclose(filtered, 1.0, atol=1e-12)
 
