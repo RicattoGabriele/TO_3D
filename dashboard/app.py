@@ -504,8 +504,9 @@ def build_domain_preview_figure(
             ),
             aspectmode="data",
             camera=dict(
-                eye=dict(x=1.6, y=-1.8, z=1.2),
-                up=dict(x=0, y=0, z=1)
+                eye=dict(x=2.2, y=-2.5, z=1.5),
+                up=dict(x=0, y=0, z=1),
+                projection=dict(type='perspective')
             )
         ),
         margin=dict(l=0, r=0, b=0, t=0),
@@ -896,3 +897,4 @@ if has_result:
         with st.expander("TO_3D_log.pdf"):
             with open(pdf_path, "rb") as f:
                 st.download_button("DOWNLOAD PDF", data=f.read(), file_name="TO_3D_log.pdf", mime="application/pdf")
+# Trigger reload

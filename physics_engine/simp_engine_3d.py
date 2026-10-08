@@ -296,6 +296,11 @@ class SIMPResult3D:
             # Smooth the density matrix slightly to eliminate non-manifold diagonal connections
             density_smoothed = ndimage.gaussian_filter(self.density_matrix, sigma=0.8)
             
+            # Restore exact 1.0 values for passive solid regions so they don't disappear visually
+            if hasattr(self, 'passive_solid') and np.any(self.passive_solid):
+                passive_mask = self.passive_solid.reshape((self.nelz, self.nely, self.nelx))
+                density_smoothed[passive_mask] = 1.0
+            
             # Pad the matrix with 0s to ensure the mesh is closed at the boundaries
             padded = np.pad(density_smoothed, 1, mode='constant', constant_values=0.0)
             
@@ -532,7 +537,7 @@ class SIMPOptimizer3D:
                     cy = (ely + 0.5) * dy
                     cz = (elz + 0.5) * dz
                     if xmin <= cx <= xmax and ymin <= cy <= ymax and zmin <= cz <= zmax:
-                        idx = self.element_id(elx, ely, elz)
+                        idx = elx + ely * self.nelx + elz * self.nelx * self.nely
                         self.passive_solid[idx] = True
 
     def add_load(self, i: int, j: int, k: int, fx: float = 0.0, fy: float = 0.0, fz: float = 0.0):
