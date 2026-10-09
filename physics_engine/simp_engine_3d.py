@@ -191,11 +191,10 @@ def geometric_stiffness_basis_matrices(
 ) -> Dict[str, np.ndarray]:
     """
     Computes the 6 constant 24 x 24 geometric stiffness basis matrices G0_k
-    via centroidal 1-point quadrature (super-convergent).
+    via full 2x2x2 (8-point) Gauss quadrature to eliminate hourglass modes.
     Components: 'xx', 'yy', 'zz', 'yz', 'xz', 'xy'
     """
-    V_e = dx * dy * dz
-    B_nl_0 = h8_displacement_gradient_bnl(0.0, 0.0, 0.0, dx, dy, dz)
+    _, det_J, _ = h8_jacobian(dx, dy, dz)
 
     T_matrices = {
         'xx': np.zeros((9, 9), dtype=np.float64),
@@ -219,9 +218,16 @@ def geometric_stiffness_basis_matrices(
     for r, c in [(0, 1), (1, 0), (3, 4), (4, 3), (6, 7), (7, 6)]:
         T_matrices['xy'][r, c] = 1.0
 
-    G0_bases = {}
-    for key, T_mat in T_matrices.items():
-        G0_bases[key] = V_e * (B_nl_0.T @ T_mat @ B_nl_0)
+    G0_bases = {key: np.zeros((24, 24), dtype=np.float64) for key in T_matrices.keys()}
+
+    gauss_pts = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
+
+    for xi in gauss_pts:
+        for eta in gauss_pts:
+            for zeta in gauss_pts:
+                B_nl = h8_displacement_gradient_bnl(xi, eta, zeta, dx, dy, dz)
+                for key, T_mat in T_matrices.items():
+                    G0_bases[key] += (B_nl.T @ T_mat @ B_nl) * det_J
 
     return G0_bases
 
@@ -712,7 +718,7 @@ class SIMPOptimizer3D:
 
             # 3. Density Filtering and Accelerated Heaviside Projection Continuation
             # Ramps beta progressively to eliminate grey intermediate elements and produce slender chords
-            beta = float(min(32.0, 1.0 * (2.0 ** (it // 4))))
+            beta = float(min(32.0, 1.0 + it / 10.0))
             eta = 0.5
             denom = np.tanh(beta * eta) + np.tanh(beta * (1.0 - eta))
 
@@ -785,8 +791,28 @@ class SIMPOptimizer3D:
                 try:
                     k_req = min(5, G_free.shape[0] - 2)
                     if k_req > 0:
-                        evals, evecs = sla.eigsh(G_free, M=K_free, k=k_req, which='SA', tol=1e-3, maxiter=1000)
-                        mu_all = -evals
+                        sigma = 1e-6
+                        # We want the smallest positive lambda_buckle in (K + lambda_buckle * G) x = 0
+                        # This means K x = mu (-G) x, where mu = lambda_buckle. We want smallest positive mu.
+                        # Using A=K, M=-G, sigma=1e-6, mode='buckling' finds exactly this.
+                        # The shifted matrix is A - sigma M = K - sigma * (-G) = K + sigma * G
+                        A_shift = K_free + sigma * G_free
+                        diag_A = A_shift.diagonal()
+                        diag_safe = np.where(np.abs(diag_A) > 1e-12, diag_A, 1.0)
+                        M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=A_shift.shape, format="csr")
+
+                        def matvec_shift(b):
+                            x, _ = sla.cg(A_shift, b, M=M_jacobi, rtol=1e-5, maxiter=2000)
+                            return x
+                        
+                        OPinv = sla.LinearOperator(matvec=matvec_shift, shape=A_shift.shape, dtype=float)
+                        
+                        evals, evecs = sla.eigsh(K_free, M=-G_free, k=k_req, sigma=sigma, OPinv=OPinv, mode='buckling', which='LM', tol=1e-3, maxiter=1000)
+                        # evals are mu = lambda_buckle. The original code expected mu_all = 1/lambda_buckle.
+                        # Original code: mu_all = -evals_original (where evals_original = -1/lambda_buckle).
+                        # So original mu_all = 1/lambda_buckle.
+                        # Since our evals are lambda_buckle directly, we need mu_all = 1.0 / evals
+                        mu_all = 1.0 / evals
                         idx_sort = np.argsort(mu_all)[::-1]
                         mu_1 = float(mu_all[idx_sort[0]])
                         phi_free = evecs[:, idx_sort[0]].copy()

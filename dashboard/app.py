@@ -604,21 +604,23 @@ with st.sidebar:
                         
         elif cmd == "NODE" and len(parts) >= 4:
             try:
-                x = eval(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                y = eval(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                z = eval(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                import sympy
+                x = float(sympy.sympify(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                y = float(sympy.sympify(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                z = float(sympy.sympify(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
                 parsed_supports.append(("NODE", float(x), float(y), float(z), ux, uy, uz))
                 custom_supports.append((float(x), float(y), float(z), desc_str))
             except: pass
             
         elif cmd == "BOX" and len(parts) >= 7:
             try:
-                x1 = eval(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                x2 = eval(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                y1 = eval(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                y2 = eval(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                z1 = eval(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                z2 = eval(parts[6].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                import sympy
+                x1 = float(sympy.sympify(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                x2 = float(sympy.sympify(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                y1 = float(sympy.sympify(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                y2 = float(sympy.sympify(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                z1 = float(sympy.sympify(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                z2 = float(sympy.sympify(parts[6].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
                 xmin, xmax = min(float(x1), float(x2)), max(float(x1), float(x2))
                 ymin, ymax = min(float(y1), float(y2)), max(float(y1), float(y2))
                 zmin, zmax = min(float(z1), float(z2)), max(float(z1), float(z2))
@@ -639,9 +641,10 @@ with st.sidebar:
         parts = line.split()
         if parts[0] == "LOAD" and len(parts) >= 7:
             try:
-                x = eval(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                y = eval(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                z = eval(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                import sympy
+                x = float(sympy.sympify(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                y = float(sympy.sympify(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                z = float(sympy.sympify(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
                 fx, fy, fz = float(parts[4]), float(parts[5]), float(parts[6])
                 applied_loads.append((float(x), float(y), float(z), fx, fy, fz))
             except: pass
@@ -657,12 +660,13 @@ with st.sidebar:
         parts = line.split()
         if parts[0] == "BOX" and len(parts) >= 7:
             try:
-                x1 = eval(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                x2 = eval(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                y1 = eval(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                y2 = eval(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                z1 = eval(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
-                z2 = eval(parts[6].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), {"__builtins__": None}, safe_dict)
+                import sympy
+                x1 = float(sympy.sympify(parts[1].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                x2 = float(sympy.sympify(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                y1 = float(sympy.sympify(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                y2 = float(sympy.sympify(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                z1 = float(sympy.sympify(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                z2 = float(sympy.sympify(parts[6].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
                 xmin, xmax = min(float(x1), float(x2)), max(float(x1), float(x2))
                 ymin, ymax = min(float(y1), float(y2)), max(float(y1), float(y2))
                 zmin, zmax = min(float(z1), float(z2)), max(float(z1), float(z2))

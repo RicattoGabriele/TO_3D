@@ -392,6 +392,15 @@ $40 \times 20 \times 10$ & 8,000 & 28,413 & $\sim 55$ MB & \textbf{$<$ 620 MB} &
 \end{tabular}
 \end{table}
 
+\section{Development Log (Sprint 1)}
+The following critical issues were resolved during Sprint 1:
+\begin{itemize}
+    \item \textbf{Fix 1: Zero-Energy Hourglassing Modes.} The geometric stiffness basis matrices $\mathbf{G}_{0,k}$ were originally calculated using centroidal 1-point quadrature. To eliminate spurious zero-energy hourglass modes, the implementation in \texttt{simp\_engine\_3d.py} was updated to utilize full $2\times2\times2$ (8-point) Gauss quadrature, consistent with the construction of the elastic stiffness matrix.
+    \item \textbf{Fix 2: ARPACK Out-Of-Memory (OOM) Crash in Buckling Solver.} The linear buckling solver originally invoked \texttt{scipy.sparse.linalg.eigsh} using the exact sparse matrix $\mathbf{K}_{\text{free}}$, prompting ARPACK to execute a memory-intensive SuperLU factorization (\texttt{splu}). To eliminate this OOM bottleneck, the solver was refactored to use shift-invert mode (\texttt{sigma=1e-6}) via a custom \texttt{LinearOperator} that iteratively solves the shifted system $(\mathbf{K}_{\text{free}} + \sigma \mathbf{G}_{\text{free}})\mathbf{x} = \mathbf{b}$ using Preconditioned Conjugate Gradient (PCG) with a Jacobi preconditioner. The problem is solved as $\mathbf{K} \mathbf{x} = \mu (-\mathbf{G}) \mathbf{x}$ in buckling mode to correctly find the smallest positive buckling load multiplier.
+    \item \textbf{Fix 3: Remote Code Execution (RCE) Vulnerability in Dashboard.} The \texttt{eval()} calls used to parse mathematical expressions for nodal forces and boundary boxes in \texttt{app.py} presented a severe RCE vulnerability. These were successfully replaced with \texttt{sympy.sympify} to safely and robustly parse geometric user inputs.
+    \item \textbf{Fix 4: Aggressive Heaviside Projection Ramp.} The exponent-based continuation ramp for the Heaviside projection parameter $\beta$ originally escalated too aggressively ($2^{\lfloor \text{it}/4 \rfloor}$), causing the optimizer to freeze in suboptimal chunky local minima. This was replaced with a gentler, linearly increasing ramp ($\beta = \min(32.0, 1.0 + \text{it} / 10.0)$), affording the algorithm sufficient iteration cycles to discover highly slender truss-like ties.
+\end{itemize}
+
 \begin{thebibliography}{99}
 \bibitem{ferrari2020}
 Ferrari, F., \& Sigmund, O. (2020). Revisiting topology optimization with buckling constraints. \textit{Structural and Multidisciplinary Optimization}, 61(4), 1401--1415.
