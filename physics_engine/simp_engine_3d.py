@@ -20,6 +20,16 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as sla
 import scipy.ndimage as ndimage
 
+try:
+    import nlopt
+except ImportError:
+    nlopt = None
+
+try:
+    import pyamg
+except ImportError:
+    pyamg = None
+
 
 # =============================================================================
 # 1. H8 Nodal Coordinates in Natural Space [-1, 1]^3
@@ -232,6 +242,59 @@ def geometric_stiffness_basis_matrices(
     return G0_bases
 
 
+def h8_thermal_conductivity_kth0(
+    dx: float = 1.0, dy: float = 1.0, dz: float = 1.0,
+    k_th: float = 1.0
+) -> np.ndarray:
+    """
+    Integrates the 8 x 8 elemental thermal conductivity matrix k_th0 using 2x2x2 Gauss quadrature.
+    """
+    D_th = np.diag([k_th, k_th, k_th])
+    _, det_J, _ = h8_jacobian(dx, dy, dz)
+
+    gauss_pts = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
+    k_th0 = np.zeros((8, 8), dtype=np.float64)
+
+    for xi in gauss_pts:
+        for eta in gauss_pts:
+            for zeta in gauss_pts:
+                _, dN_dnat = h8_shape_functions(xi, eta, zeta)
+                dN_dx = (2.0 / dx) * dN_dnat[:, 0]
+                dN_dy = (2.0 / dy) * dN_dnat[:, 1]
+                dN_dz = (2.0 / dz) * dN_dnat[:, 2]
+                
+                # B_th is 3 x 8
+                B_th = np.vstack([dN_dx, dN_dy, dN_dz])
+                k_th0 += (B_th.T @ D_th @ B_th) * det_J
+
+    return k_th0
+
+
+def h8_thermal_expansion_force_fth0(
+    dx: float = 1.0, dy: float = 1.0, dz: float = 1.0,
+    E0: float = 1.0, nu: float = 0.3, alpha_th: float = 1.0
+) -> np.ndarray:
+    """
+    Integrates the 24 x 1 elemental thermal expansion force vector f_th0 for a unit temperature change.
+    """
+    D = elastic_constitutive_matrix_d(E0, nu)
+    _, det_J, _ = h8_jacobian(dx, dy, dz)
+    
+    eps_th = np.array([alpha_th, alpha_th, alpha_th, 0.0, 0.0, 0.0], dtype=np.float64)
+    stress_th = D @ eps_th
+    
+    gauss_pts = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
+    f_th0 = np.zeros(24, dtype=np.float64)
+    
+    for xi in gauss_pts:
+        for eta in gauss_pts:
+            for zeta in gauss_pts:
+                B = h8_strain_displacement_b(xi, eta, zeta, dx, dy, dz)
+                f_th0 += (B.T @ stress_th) * det_J
+                
+    return f_th0
+
+
 def spherical_cone_kernel(rmin: float, dx: float = 1.0, dy: float = 1.0, dz: float = 1.0) -> np.ndarray:
     """
     Generates discrete 3D spherical cone convolution kernel:
@@ -274,6 +337,7 @@ class SIMPResult3D:
     dz: float = 1.0
     displacements: Optional[np.ndarray] = None
     stresses: Optional[Dict[str, np.ndarray]] = None
+    temperatures: Optional[np.ndarray] = None
 
     def export_voxel_stl(self, filepath: str, threshold: float = 0.5) -> str:
         """
@@ -356,6 +420,330 @@ class SIMPResult3D:
 
 
 # =============================================================================
+# 2b. Sparse Linear Solvers (AMG / PCG / Direct)
+# =============================================================================
+def solve_linear_system(
+    A: sp.spmatrix,
+    b: np.ndarray,
+    x0: Optional[np.ndarray] = None,
+    solver_type: str = "amg",
+    rtol: float = 1e-5,
+    maxiter: int = 2000
+) -> Tuple[np.ndarray, int, str]:
+    """
+    Robust sparse linear solver for symmetric positive definite systems.
+
+    Supports:
+      - 'amg': Smoothed aggregation AMG (pyamg) V-cycle preconditioned CG
+      - 'pcg' or 'jacobi': Jacobi diagonal preconditioned CG
+      - 'direct': SuperLU direct factorization / spsolve
+
+    Fallback chain:
+      AMG-PCG -> Jacobi-PCG -> scipy.sparse.linalg.spsolve
+
+    Returns:
+      (x, exit_code, solver_name)
+    """
+    A_csr = sp.csr_matrix(A, dtype=np.float64)
+    b_vec = np.asarray(b, dtype=np.float64).ravel()
+    x0_vec = np.asarray(x0, dtype=np.float64).ravel() if x0 is not None else None
+
+    stype = str(solver_type).lower()
+
+    if stype in ("direct", "superlu", "factorized"):
+        try:
+            solve_direct = sla.factorized(A_csr.tocsc())
+            return solve_direct(b_vec), 0, "direct_factorized"
+        except Exception:
+            return sla.spsolve(A_csr, b_vec), 0, "direct_spsolve"
+
+    if stype in ("amg", "amg_pcg"):
+        try:
+            if pyamg is not None:
+                ml = pyamg.smoothed_aggregation_solver(A_csr, coarse_solver='pinv', symmetry='symmetric')
+                M_amg = ml.aspreconditioner(cycle='V')
+                try:
+                    x, exit_code = sla.cg(A_csr, b_vec, x0=x0_vec, M=M_amg, rtol=rtol, maxiter=maxiter)
+                except TypeError:
+                    x, exit_code = sla.cg(A_csr, b_vec, x0=x0_vec, M=M_amg, tol=rtol, maxiter=maxiter)
+                if exit_code == 0 and not np.any(np.isnan(x)):
+                    return x, 0, "amg_pcg"
+        except Exception:
+            pass  # Fallback to Jacobi-PCG
+
+    # Jacobi PCG (primary fallback or when stype in ('pcg', 'jacobi'))
+    try:
+        diag_A = A_csr.diagonal()
+        diag_safe = np.where(np.abs(diag_A) > 1e-12, diag_A, 1.0)
+        M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=A_csr.shape, format="csr")
+        try:
+            x, exit_code = sla.cg(A_csr, b_vec, x0=x0_vec, M=M_jacobi, rtol=rtol, maxiter=maxiter)
+        except TypeError:
+            x, exit_code = sla.cg(A_csr, b_vec, x0=x0_vec, M=M_jacobi, tol=rtol, maxiter=maxiter)
+        if exit_code == 0 and not np.any(np.isnan(x)):
+            return x, 0, "jacobi_pcg"
+    except Exception:
+        pass  # Fallback to direct solver
+
+    # Final emergency fallback: direct spsolve
+    try:
+        x = sla.spsolve(A_csr, b_vec)
+        return x, 0, "fallback_spsolve"
+    except Exception:
+        x, _, _, _ = sla.lsqr(A_csr, b_vec)[:4]
+        return x, 0, "fallback_lsqr"
+
+
+# =============================================================================
+# 2c. NLopt MMA State-Caching Evaluator
+# =============================================================================
+class _TOStateEvaluator:
+    """
+    State-caching evaluator for NLopt MMA topology optimization.
+    Eliminates redundant FEA solves between objective and constraint callbacks
+    at the same design vector x.
+    """
+    def __init__(
+        self,
+        optimizer: 'SIMPOptimizer3D',
+        free_dofs: np.ndarray,
+        force_vec: np.ndarray,
+        max_iter: int,
+        tol: float,
+        opt_alpha: float,
+        mode: str,
+        cb: Optional[Callable],
+        solver_type: str = "amg"
+    ):
+        self.opt = optimizer
+        self.free_dofs = free_dofs
+        self.force_vec = force_vec
+        self.max_iter = max_iter
+        self.tol = tol
+        self.opt_alpha = opt_alpha
+        self.mode = mode
+        self.cb = cb
+        self.solver_type = solver_type
+
+        # Thermal state tracking
+        self.has_thermal = (
+            len(self.opt.fixed_thermal_nodes) > 0
+            or np.any(np.abs(self.opt.heat_source_vector) > 1e-12)
+        )
+        self.T: Optional[np.ndarray] = None
+        self.P: Optional[np.ndarray] = None
+        self.dT_elements: Optional[np.ndarray] = None
+        self.F_th: Optional[np.ndarray] = None
+
+        self.it = 0
+        self.last_x: Optional[np.ndarray] = None
+        self.C0: Optional[float] = None
+        self.u_free_prev: Optional[np.ndarray] = None
+
+        # Cached evaluation state
+        self.xPhys = np.full(self.opt.num_elements, self.opt.volfrac, dtype=np.float64)
+        if np.any(self.opt.passive_solid):
+            self.xPhys[self.opt.passive_solid] = 1.0
+        self.compliance = 0.0
+        self.vol_fraction = float(self.opt.volfrac)
+        self.dc_filtered = np.zeros(self.opt.num_elements, dtype=np.float64)
+        self.dv_filtered = np.zeros(self.opt.num_elements, dtype=np.float64)
+        self.c_history: List[float] = []
+        self.ch_history: List[float] = []
+        self.blf_history: List[float] = []
+        self.U = np.zeros(self.opt.num_dofs, dtype=np.float64)
+        self.converged = False
+
+    def evaluate(self, x: np.ndarray):
+        # 1. State Cache Hit Check: reuse FEA and sensitivities if x unchanged
+        if self.last_x is not None and np.allclose(x, self.last_x, atol=1e-14, rtol=1e-12):
+            return
+
+        self.it += 1
+        it = self.it
+
+        # 2. Heaviside Continuation & Spatial Density Filtering
+        beta = float(min(32.0, 1.0 + it / 10.0))
+        eta = 0.5
+        denom = np.tanh(beta * eta) + np.tanh(beta * (1.0 - eta))
+
+        x_grid = x.reshape((self.opt.nelz, self.opt.nely, self.opt.nelx))
+        conv_x = ndimage.convolve(x_grid, self.opt.kernel, mode='constant', cval=0.0)
+        x_tilde = (conv_x / self.opt.kernel_normalizer).ravel()
+
+        xPhys = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde - eta))) / denom
+        if np.any(self.opt.passive_solid):
+            xPhys[self.opt.passive_solid] = 1.0
+
+        # 3. Finite Element Assembly & Sparse Linear Solve
+        if self.has_thermal:
+            # 3a. Thermal Forward Solve: K_th T = Q
+            T = self.opt.solve_thermal(xPhys, solver_type=self.solver_type)
+            T_e = T[self.opt.edofMat_th]
+            dT_elements = np.mean(T_e, axis=1) - self.opt.T_ref
+            F_th = self.opt.assemble_thermal_load_vector(xPhys, dT_elements, q_ramp=8.0)
+            F_total = self.force_vec + F_th
+            F_free = F_total[self.free_dofs]
+            self.T = T
+            self.dT_elements = dT_elements
+            self.F_th = F_th
+        else:
+            F_free = self.force_vec[self.free_dofs]
+
+        K_full = self.opt.assemble_elastic_stiffness(xPhys)
+        K_free = K_full[self.free_dofs, :][:, self.free_dofs]
+
+        x0 = self.u_free_prev if (self.u_free_prev is not None and len(self.u_free_prev) == len(self.free_dofs)) else None
+        u_free, _, _ = self.opt.solve_linear_system(
+            K_free, F_free, x0=x0, solver_type=self.solver_type
+        )
+        self.u_free_prev = u_free.copy()
+
+        U = np.zeros(self.opt.num_dofs, dtype=np.float64)
+        U[self.free_dofs] = u_free
+
+        # 4. Compliance and Strain Energy
+        U_e = U[self.opt.edofMat]
+        E_elements = self.opt.Emin + (xPhys ** self.opt.penal) * (self.opt.E0 - self.opt.Emin)
+        ce = np.sum((U_e @ self.opt.k0) * U_e, axis=1)
+        compliance = float(np.sum(E_elements * ce))
+
+        if self.has_thermal:
+            # 4b. Coupled Adjoint Thermal Solve and Exact 3-Term Sensitivities
+            P = self.opt.solve_thermal_adjoint(xPhys, U, solver_type=self.solver_type)
+            self.P = P
+            dc_comp, _, _, _ = self.opt.compute_thermo_elastic_sensitivities(
+                xPhys, U, self.T, P, q_ramp=8.0, penal_th=3.0, solver_type=self.solver_type
+            )
+        else:
+            dc_comp = -self.opt.penal * (self.opt.E0 - self.opt.Emin) * (xPhys ** (self.opt.penal - 1.0)) * ce
+
+        # 5. Linearized Buckling Stability (if coupled mode)
+        if self.opt_alpha > 0.0 or self.mode == "buckling_max":
+            sigma_all = U_e @ self.opt.DB0_T
+            E_G = (xPhys ** self.opt.penal_g)
+
+            G_full = self.opt.assemble_geometric_stiffness(xPhys, sigma_all)
+            G_free = G_full[self.free_dofs, :][:, self.free_dofs]
+
+            try:
+                k_req = min(5, G_free.shape[0] - 2)
+                if k_req > 0:
+                    sigma = 1e-6
+                    A_shift = K_free + sigma * G_free
+                    diag_A = A_shift.diagonal()
+                    diag_safe = np.where(np.abs(diag_A) > 1e-12, diag_A, 1.0)
+                    M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=A_shift.shape, format="csr")
+
+                    def matvec_shift(b):
+                        x_sh, _ = sla.cg(A_shift, b, M=M_jacobi, rtol=1e-5, maxiter=2000)
+                        return x_sh
+
+                    OPinv = sla.LinearOperator(matvec=matvec_shift, shape=A_shift.shape, dtype=float)
+                    evals, evecs = sla.eigsh(
+                        K_free, M=-G_free, k=k_req, sigma=sigma, OPinv=OPinv,
+                        mode='buckling', which='LM', tol=1e-3, maxiter=1000
+                    )
+                    mu_all = 1.0 / evals
+                    idx_sort = np.argsort(mu_all)[::-1]
+                    mu_1 = float(mu_all[idx_sort[0]])
+                    phi_free = evecs[:, idx_sort[0]].copy()
+                    norm_phi = np.sqrt(np.maximum(1e-16, phi_free @ (K_free @ phi_free)))
+                    phi_free /= norm_phi
+                else:
+                    mu_1 = 1e-6
+                    phi_free = np.ones(len(self.free_dofs)) / np.sqrt(max(1, len(self.free_dofs)))
+            except Exception:
+                mu_1 = 1e-6
+                phi_free = np.ones(len(self.free_dofs)) / np.sqrt(max(1, len(self.free_dofs)))
+
+            blf = 1.0 / mu_1 if mu_1 > 1e-12 else 1e12
+            self.blf_history.append(float(blf))
+
+            phi = np.zeros(self.opt.num_dofs, dtype=np.float64)
+            phi[self.free_dofs] = phi_free
+            phi_e = phi[self.opt.edofMat]
+
+            P_e = np.zeros((self.opt.num_elements, 6), dtype=np.float64)
+            for k in range(6):
+                P_e[:, k] = np.sum((phi_e @ self.opt.G0_bases_arr[k]) * phi_e, axis=1)
+
+            phi_kGe_phi = np.sum(sigma_all * P_e, axis=1)
+            term1 = (self.opt.penal_g * (xPhys ** (self.opt.penal_g - 1.0))) * phi_kGe_phi
+
+            phi_k0_phi = np.sum((phi_e @ self.opt.k0) * phi_e, axis=1)
+            term2 = mu_1 * (self.opt.penal * (self.opt.E0 - self.opt.Emin) * (xPhys ** (self.opt.penal - 1.0))) * phi_k0_phi
+
+            adj_L_e = (P_e @ (self.opt.D @ self.opt.B0)) * E_G[:, None]
+            F_adj = np.zeros(self.opt.num_dofs, dtype=np.float64)
+            np.add.at(F_adj, self.opt.edofMat, adj_L_e)
+
+            w_free, _, _ = self.opt.solve_linear_system(
+                K_free, F_adj[self.free_dofs], solver_type=self.solver_type
+            )
+            w = np.zeros(self.opt.num_dofs, dtype=np.float64)
+            w[self.free_dofs] = w_free
+            w_e = w[self.opt.edofMat]
+
+            w_k0_u = np.sum((w_e @ self.opt.k0) * U_e, axis=1)
+            term3 = (self.opt.penal * (self.opt.E0 - self.opt.Emin) * (xPhys ** (self.opt.penal - 1.0))) * w_k0_u
+
+            d_mu = -(term1 + term2 - term3)
+
+            scale_comp = float(np.mean(np.abs(dc_comp)))
+            scale_mu = float(np.mean(np.abs(d_mu)))
+            if scale_comp < 1e-12: scale_comp = 1.0
+            if scale_mu < 1e-12: scale_mu = 1.0
+
+            sens_comp = dc_comp / scale_comp
+            sens_mu = d_mu / scale_mu
+            effective_alpha = float(np.clip(self.opt_alpha if self.opt_alpha > 0.0 else 0.4, 0.0, 0.95))
+            sens_total = (1.0 - effective_alpha) * sens_comp + effective_alpha * sens_mu
+        else:
+            sens_total = dc_comp
+
+        # 6. Sensitivity Filtering & Chain Rule Backpropagation
+        dxPhys_dxtilde = beta * (1.0 - np.tanh(beta * (x_tilde - eta)) ** 2) / denom
+
+        q_obj = (sens_total * dxPhys_dxtilde).reshape((self.opt.nelz, self.opt.nely, self.opt.nelx))
+        conv_q = ndimage.convolve(q_obj / self.opt.kernel_normalizer, self.opt.kernel, mode='constant', cval=0.0)
+        dc_filtered = conv_q.ravel()
+
+        q_vol = dxPhys_dxtilde.reshape((self.opt.nelz, self.opt.nely, self.opt.nelx))
+        conv_v = ndimage.convolve(q_vol / self.opt.kernel_normalizer, self.opt.kernel, mode='constant', cval=0.0)
+        dv_filtered = conv_v.ravel()
+
+        if self.C0 is None:
+            self.C0 = max(1e-12, compliance)
+
+        # 7. Convergence Tracking & Histories
+        change = float(np.max(np.abs(x - self.last_x))) if self.last_x is not None else 1.0
+        self.ch_history.append(change)
+        self.c_history.append(compliance)
+
+        self.last_x = x.copy()
+        self.xPhys = xPhys.copy()
+        self.compliance = compliance
+        self.vol_fraction = float(np.mean(xPhys))
+        self.dc_filtered = dc_filtered
+        self.dv_filtered = dv_filtered
+        self.U = U
+
+        if self.cb is not None:
+            try:
+                self.cb(it, self.max_iter, compliance, self.vol_fraction)
+            except TypeError:
+                self.cb(it, self.max_iter)
+
+        if it > 1 and change < self.tol:
+            self.converged = True
+            raise nlopt.ForcedStop("Convergence tolerance reached.")
+
+        if it >= self.max_iter:
+            raise nlopt.ForcedStop("Maximum iterations reached.")
+
+
+# =============================================================================
 # 3. SIMPOptimizer3D Solver
 # =============================================================================
 class SIMPOptimizer3D:
@@ -380,7 +768,9 @@ class SIMPOptimizer3D:
         rmin: float = 1.5,
         volfrac: float = 0.3,
         alpha: float = 0.0,
-        solver_type: str = "pcg",  # "pcg" or "direct"
+        T_ref: float = 0.0,
+        solver_type: str = "amg",  # "amg", "pcg", or "direct"
+        optimizer_type: str = "mma",  # "mma" or "oc"
         max_iter: int = 50,
         tol: float = 0.01,
         progress_callback: Optional[Callable[[int, int, float, float], None]] = None
@@ -399,7 +789,9 @@ class SIMPOptimizer3D:
         self.rmin = float(rmin)
         self.volfrac = float(volfrac)
         self.alpha = float(alpha)
+        self.T_ref = float(T_ref)
         self.solver_type = str(solver_type).lower()
+        self.optimizer_type = str(optimizer_type).lower()
         self.max_iter = int(max_iter)
         self.tol = float(tol)
         self.progress_callback = progress_callback
@@ -410,9 +802,13 @@ class SIMPOptimizer3D:
 
         # 1. Precompute Element Matrices
         self.D = elastic_constitutive_matrix_d(self.E0, self.nu)
-        self.k0 = h8_element_stiffness_k0(self.dx, self.dy, self.dz, self.E0, self.nu)
+        self.k0 = h8_element_stiffness_k0(self.dx, self.dy, self.dz, 1.0, self.nu)
         self.B0 = h8_strain_displacement_b(0.0, 0.0, 0.0, self.dx, self.dy, self.dz)
         self.DB0_T = (self.D @ self.B0).T  # Precomputed for fast stress evaluation (24, 6)
+
+        # 1b. Precompute Thermal Matrices
+        self.k_th0 = h8_thermal_conductivity_kth0(self.dx, self.dy, self.dz, k_th=1.0)
+        self.f_th0 = h8_thermal_expansion_force_fth0(self.dx, self.dy, self.dz, 1.0, self.nu, alpha_th=1.0)
 
         # 2. Precompute 6 Geometric Stiffness Basis Matrices
         G0_dict = geometric_stiffness_basis_matrices(self.dx, self.dy, self.dz)
@@ -425,6 +821,10 @@ class SIMPOptimizer3D:
         self.iK = np.repeat(self.edofMat, 24, axis=1).ravel()
         self.jK = np.tile(self.edofMat, (1, 24)).ravel()
 
+        self.edofMat_th = self._build_thermal_edof_matrix()
+        self.iK_th = np.repeat(self.edofMat_th, 8, axis=1).ravel()
+        self.jK_th = np.tile(self.edofMat_th, (1, 8)).ravel()
+
         # 4. Precompute 3D Convolution Spatial Filter
         self.kernel = spherical_cone_kernel(self.rmin, self.dx, self.dy, self.dz)
         ones_grid = np.ones((self.nelz, self.nely, self.nelx), dtype=np.float64)
@@ -434,9 +834,79 @@ class SIMPOptimizer3D:
         # 5. Boundary Condition Storage
         self.fixed_dofs: Set[int] = set()
         self.force_vector = np.zeros(self.num_dofs, dtype=np.float64)
-        
+
+        # 5b. Thermal Boundary Condition Storage
+        self.fixed_thermal_nodes: Dict[int, float] = {}
+        self.heat_source_vector = np.zeros(self.num_nodes, dtype=np.float64)
+
         # Non-Design Spaces
         self.passive_solid = np.zeros(self.num_elements, dtype=bool)
+
+    def _build_thermal_edof_matrix(self) -> np.ndarray:
+        """
+        Builds element degree-of-freedom mapping matrix for thermal (1 DOF per node)
+        of shape (num_elements, 8).
+        """
+        edofMat_th = np.zeros((self.num_elements, 8), dtype=np.int32)
+        idx = 0
+        for elz in range(self.nelz):
+            for ely in range(self.nely):
+                for elx in range(self.nelx):
+                    n1 = self.node_id(elx,     ely,     elz)
+                    n2 = self.node_id(elx + 1, ely,     elz)
+                    n3 = self.node_id(elx + 1, ely + 1, elz)
+                    n4 = self.node_id(elx,     ely + 1, elz)
+                    n5 = self.node_id(elx,     ely,     elz + 1)
+                    n6 = self.node_id(elx + 1, ely,     elz + 1)
+                    n7 = self.node_id(elx + 1, ely + 1, elz + 1)
+                    n8 = self.node_id(elx,     ely + 1, elz + 1)
+                    edofMat_th[idx, :] = [n1, n2, n3, n4, n5, n6, n7, n8]
+                    idx += 1
+        return edofMat_th
+
+    def assemble_elastic_stiffness(self, xPhys: np.ndarray) -> sp.csr_matrix:
+        """Assembles the global elastic stiffness matrix K using SIMP interpolation."""
+        E_elements = self.Emin + (xPhys ** self.penal) * (self.E0 - self.Emin)
+        sK = np.empty(self.num_elements * 576, dtype=np.float64)
+        k0_flat = self.k0.ravel()
+        for i in range(576):
+            sK[i::576] = E_elements * k0_flat[i]
+        return sp.coo_matrix((sK, (self.iK, self.jK)), shape=(self.num_dofs, self.num_dofs)).tocsr()
+
+    def assemble_geometric_stiffness(self, xPhys: np.ndarray, sigma_all: np.ndarray) -> sp.csr_matrix:
+        """Assembles the global geometric stiffness matrix G using SIMP interpolation."""
+        E_G = (xPhys ** self.penal_g)
+        sG = np.zeros(self.num_elements * 576, dtype=np.float64)
+        for k in range(6):
+            basis_flat = self.G0_bases_arr[k].ravel()
+            term = sigma_all[:, k] * E_G
+            for i in range(576):
+                if basis_flat[i] != 0.0:
+                    sG[i::576] += term * basis_flat[i]
+        return sp.coo_matrix((sG, (self.iK, self.jK)), shape=(self.num_dofs, self.num_dofs)).tocsr()
+
+    def assemble_thermal_conductivity(self, xPhys: np.ndarray, penal_th: float = 3.0) -> sp.csr_matrix:
+        """Assembles the global thermal conductivity matrix K_th using SIMP interpolation."""
+        k_elements = self.Emin + (xPhys ** penal_th) * (1.0 - self.Emin)
+        sK_th = np.empty(self.num_elements * 64, dtype=np.float64)
+        k_th0_flat = self.k_th0.ravel()
+        for i in range(64):
+            sK_th[i::64] = k_elements * k_th0_flat[i]
+        num_nodes_total = (self.nelx + 1) * (self.nely + 1) * (self.nelz + 1)
+        return sp.coo_matrix((sK_th, (self.iK_th, self.jK_th)), shape=(num_nodes_total, num_nodes_total)).tocsr()
+
+    def assemble_thermal_load_vector(self, xPhys: np.ndarray, dT_elements: np.ndarray, q_ramp: float = 8.0) -> np.ndarray:
+        """Assembles the global thermal expansion force vector using RAMP interpolation."""
+        # RAMP interpolation logic specifically for thermal expansion
+        ramp_factor = xPhys / (1.0 + q_ramp * (1.0 - xPhys))
+        E_th_elements = self.Emin + ramp_factor * (self.E0 - self.Emin)
+        
+        # Element force = E_th * dT * f_th0
+        f_e = (E_th_elements * dT_elements)[:, None] * self.f_th0[None, :]
+        
+        F_th = np.zeros(self.num_dofs, dtype=np.float64)
+        np.add.at(F_th, self.edofMat, f_e)
+        return F_th
 
     def _build_edof_matrix(self) -> np.ndarray:
         """
@@ -474,10 +944,17 @@ class SIMPOptimizer3D:
         return i * (self.nely + 1) * (self.nelz + 1) + j * (self.nelz + 1) + k
 
     def clear_boundary_conditions(self):
-        """Clears all fixed DOFs and applied forces."""
+        """Clears all fixed DOFs and applied forces, and thermal boundary conditions."""
         self.fixed_dofs.clear()
         self.force_vector.fill(0.0)
         self.passive_solid.fill(False)
+        self.clear_thermal_boundary_conditions()
+
+    def clear_thermal_boundary_conditions(self):
+        """Clears all fixed thermal nodes and applied heat sources, resets T_ref."""
+        self.fixed_thermal_nodes.clear()
+        self.heat_source_vector.fill(0.0)
+        self.T_ref = 0.0
 
     def fix_dof(self, dof: int):
         """Fix a single degree of freedom."""
@@ -532,19 +1009,213 @@ class SIMPOptimizer3D:
         """Compatibility alias for fix_face."""
         self.fix_face(face=side, fix_x=fix_x, fix_y=fix_y, fix_z=fix_z)
 
+    def fix_thermal_node(self, ix: int, iy: int, iz: int, temp: float = 0.0):
+        """Fix nodal temperature of node (ix, iy, iz)."""
+        nid = self.node_id(int(ix), int(iy), int(iz))
+        self.fixed_thermal_nodes[nid] = float(temp)
 
-    def add_passive_box(self, xmin: float, xmax: float, ymin: float, ymax: float, zmin: float, zmax: float, dx: float, dy: float, dz: float):
+    def fix_thermal_face(self, face: str = "left", temp: float = 0.0):
+        """
+        Fix temperature of an entire boundary face:
+        'left' (x=0), 'right' (x=nelx), 'bottom'/'down' (y=0), 'top'/'up' (y=nely),
+        'front'/'bottom_z' (z=0), 'back'/'top_z' (z=nelz).
+        """
+        face = face.lower()
+        if face == "left":
+            for j in range(self.nely + 1):
+                for k in range(self.nelz + 1):
+                    self.fix_thermal_node(0, j, k, temp)
+        elif face == "right":
+            for j in range(self.nely + 1):
+                for k in range(self.nelz + 1):
+                    self.fix_thermal_node(self.nelx, j, k, temp)
+        elif face in ["bottom", "down"]:
+            for i in range(self.nelx + 1):
+                for k in range(self.nelz + 1):
+                    self.fix_thermal_node(i, 0, k, temp)
+        elif face in ["top", "up"]:
+            for i in range(self.nelx + 1):
+                for k in range(self.nelz + 1):
+                    self.fix_thermal_node(i, self.nely, k, temp)
+        elif face in ["front", "bottom_z"]:
+            for i in range(self.nelx + 1):
+                for j in range(self.nely + 1):
+                    self.fix_thermal_node(i, j, 0, temp)
+        elif face in ["back", "top_z"]:
+            for i in range(self.nelx + 1):
+                for j in range(self.nely + 1):
+                    self.fix_thermal_node(i, j, self.nelz, temp)
+        else:
+            raise ValueError(f"Unknown face '{face}'. Expected 'left', 'right', 'bottom', 'top', 'front', or 'back'.")
+
+    def fix_thermal_wall(self, side: str = "left", temp: float = 0.0):
+        """Compatibility alias for fix_thermal_face."""
+        self.fix_thermal_face(face=side, temp=temp)
+
+    def add_heat_source(self, ix: int, iy: int, iz: int, q: float):
+        """Apply point heat source/flux to node (ix, iy, iz)."""
+        nid = self.node_id(int(ix), int(iy), int(iz))
+        self.heat_source_vector[nid] += float(q)
+
+
+    def add_passive_box(
+        self,
+        xmin: float, xmax: float,
+        ymin: float, ymax: float,
+        zmin: float, zmax: float,
+        dx: Optional[float] = None,
+        dy: Optional[float] = None,
+        dz: Optional[float] = None
+    ):
         """Forces elements within the specified physical bounding box to be solid (x=1)."""
+        elem_dx = float(dx) if dx is not None else self.dx
+        elem_dy = float(dy) if dy is not None else self.dy
+        elem_dz = float(dz) if dz is not None else self.dz
         for elx in range(self.nelx):
             for ely in range(self.nely):
                 for elz in range(self.nelz):
                     # Element center coordinates
-                    cx = (elx + 0.5) * dx
-                    cy = (ely + 0.5) * dy
-                    cz = (elz + 0.5) * dz
+                    cx = (elx + 0.5) * elem_dx
+                    cy = (ely + 0.5) * elem_dy
+                    cz = (elz + 0.5) * elem_dz
                     if xmin <= cx <= xmax and ymin <= cy <= ymax and zmin <= cz <= zmax:
                         idx = elx + ely * self.nelx + elz * self.nelx * self.nely
                         self.passive_solid[idx] = True
+
+    def solve_linear_system(
+        self,
+        A: sp.spmatrix,
+        b: np.ndarray,
+        x0: Optional[np.ndarray] = None,
+        solver_type: Optional[str] = None,
+        rtol: float = 1e-5,
+        maxiter: int = 2000
+    ) -> Tuple[np.ndarray, int, str]:
+        """
+        Solves linear system A x = b using the configured or specified solver type.
+        """
+        stype = solver_type if solver_type is not None else self.solver_type
+        return solve_linear_system(A, b, x0=x0, solver_type=stype, rtol=rtol, maxiter=maxiter)
+
+    def solve_thermal(
+        self,
+        xPhys: np.ndarray,
+        solver_type: Optional[str] = None,
+        penal_th: float = 3.0
+    ) -> np.ndarray:
+        """
+        Solves steady-state heat conduction K_th T = Q for nodal temperatures T.
+        Prescribed boundary condition: Dirichlet temperatures on fixed_thermal_nodes.
+        """
+        xPhys_vec = np.asarray(xPhys, dtype=np.float64).ravel()
+        K_th = self.assemble_thermal_conductivity(xPhys_vec, penal_th=penal_th)
+        num_nodes_total = self.num_nodes
+        fixed_th_set = set(self.fixed_thermal_nodes.keys())
+        free_th_dofs = np.array([n for n in range(num_nodes_total) if n not in fixed_th_set], dtype=np.int32)
+
+        T_full = np.zeros(num_nodes_total, dtype=np.float64)
+        for nid, val in self.fixed_thermal_nodes.items():
+            if 0 <= nid < num_nodes_total:
+                T_full[nid] = float(val)
+
+        if len(free_th_dofs) == 0:
+            return T_full
+
+        Q_free = self.heat_source_vector[free_th_dofs].copy()
+        fixed_th_dofs = np.array([n for n in fixed_th_set if 0 <= n < num_nodes_total], dtype=np.int32)
+        if len(fixed_th_dofs) > 0 and np.any(np.abs(T_full[fixed_th_dofs]) > 1e-12):
+            K_th_fp = K_th[free_th_dofs, :][:, fixed_th_dofs]
+            Q_free -= K_th_fp @ T_full[fixed_th_dofs]
+
+        K_th_free = K_th[free_th_dofs, :][:, free_th_dofs]
+        stype = solver_type if solver_type is not None else self.solver_type
+        T_free, _, _ = self.solve_linear_system(K_th_free, Q_free, solver_type=stype)
+        T_full[free_th_dofs] = T_free
+        return T_full
+
+    def solve_thermal_adjoint(
+        self,
+        xPhys: np.ndarray,
+        U: np.ndarray,
+        solver_type: Optional[str] = None,
+        q_ramp: float = 8.0,
+        penal_th: float = 3.0
+    ) -> np.ndarray:
+        """
+        Solves adjoint thermal system K_th @ P = F_adj_th for adjoint temperatures P.
+        F_adj_th_i = sum_{e in elem(i)} 1/8 * E_th(xPhys_e) * (u_e.T @ f_th0).
+        Prescribed boundary condition: P_i = 0 on fixed thermal nodes.
+        """
+        xPhys_vec = np.asarray(xPhys, dtype=np.float64).ravel()
+        U_e = U[self.edofMat]
+        u_fth0 = np.sum(U_e * self.f_th0, axis=1)
+
+        ramp = xPhys_vec / (1.0 + q_ramp * (1.0 - xPhys_vec))
+        E_th = self.Emin + ramp * (self.E0 - self.Emin)
+        gamma_e = E_th * u_fth0
+
+        F_adj_th = np.zeros(self.num_nodes, dtype=np.float64)
+        gamma_nodes = np.repeat((0.125 * gamma_e)[:, None], 8, axis=1)
+        np.add.at(F_adj_th, self.edofMat_th, gamma_nodes)
+
+        K_th = self.assemble_thermal_conductivity(xPhys_vec, penal_th=penal_th)
+        fixed_th_set = set(self.fixed_thermal_nodes.keys())
+        free_th_dofs = np.array([n for n in range(self.num_nodes) if n not in fixed_th_set], dtype=np.int32)
+
+        P = np.zeros(self.num_nodes, dtype=np.float64)
+        if len(free_th_dofs) > 0:
+            K_th_free = K_th[free_th_dofs, :][:, free_th_dofs]
+            stype = solver_type if solver_type is not None else self.solver_type
+            p_free, _, _ = self.solve_linear_system(
+                K_th_free, F_adj_th[free_th_dofs], solver_type=stype
+            )
+            P[free_th_dofs] = p_free
+        return P
+
+    def compute_thermo_elastic_sensitivities(
+        self,
+        xPhys: np.ndarray,
+        U: np.ndarray,
+        T: np.ndarray,
+        P: Optional[np.ndarray] = None,
+        q_ramp: float = 8.0,
+        penal_th: float = 3.0,
+        solver_type: Optional[str] = None
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Computes exact 3-term adjoint sensitivities for coupled thermo-elastic compliance:
+            dC/dx_e = Term 1 + Term 2 + Term 3
+        where:
+            Term 1 (elastic stiffness):           - p * xPhys**(p-1) * (E0 - Emin) * c_e
+            Term 2 (RAMP thermal expansion load): + 2 * dEth/dx * dT_elements * (u_e.T @ f_th0)
+            Term 3 (thermal conductivity adjoint): - 2 * p_th * xPhys**(p_th-1) * (1 - Emin) * (p_e.T @ k_th0 @ T_e)
+        Returns:
+            (dc_total, term1, term2, term3)
+        """
+        xPhys_vec = np.asarray(xPhys, dtype=np.float64).ravel()
+        U_e = U[self.edofMat]
+        ce = np.sum((U_e @ self.k0) * U_e, axis=1)
+        dE_dx = self.penal * (xPhys_vec ** (self.penal - 1.0)) * (self.E0 - self.Emin)
+        term1 = - dE_dx * ce
+
+        T_e = T[self.edofMat_th]
+        dT_elements = np.mean(T_e, axis=1) - self.T_ref
+        u_fth0 = np.sum(U_e * self.f_th0, axis=1)
+
+        dramp_dx = (1.0 + q_ramp) / ((1.0 + q_ramp * (1.0 - xPhys_vec)) ** 2)
+        dEth_dx = dramp_dx * (self.E0 - self.Emin)
+        term2 = 2.0 * dEth_dx * dT_elements * u_fth0
+
+        if P is None:
+            P = self.solve_thermal_adjoint(xPhys_vec, U, solver_type=solver_type, q_ramp=q_ramp, penal_th=penal_th)
+
+        P_e = P[self.edofMat_th]
+        dkth_dx = penal_th * (xPhys_vec ** (penal_th - 1.0)) * (1.0 - self.Emin)
+        p_kth0_T = np.sum((P_e @ self.k_th0) * T_e, axis=1)
+        term3 = - 2.0 * dkth_dx * p_kth0_T
+
+        dc_total = term1 + term2 + term3
+        return dc_total, term1, term2, term3
 
     def add_load(self, i: int, j: int, k: int, fx: float = 0.0, fy: float = 0.0, fz: float = 0.0):
         """Apply concentrated point load in Newtons to node (i, j, k)."""
@@ -642,7 +1313,9 @@ class SIMPOptimizer3D:
         mode: str = "compliance",
         alpha: Optional[float] = None,
         alpha_buckling: Optional[float] = None,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        optimizer_type: Optional[str] = None,
+        solver_type: Optional[str] = None
     ) -> SIMPResult3D:
         """
         Executes 3D continuum topology optimization.
@@ -656,6 +1329,8 @@ class SIMPOptimizer3D:
             alpha: Buckling weighting parameter in [0.0, 1.0].
             alpha_buckling: Synonym for alpha.
             progress_callback: Optional iteration progress callback.
+            optimizer_type: "mma" (default) or "oc".
+            solver_type: "amg" (default), "pcg", or "direct".
         """
         start_time = time.time()
         import tracemalloc
@@ -663,6 +1338,9 @@ class SIMPOptimizer3D:
         max_iterations = max_iter if max_iter is not None else self.max_iter
         convergence_tol = tol if tol is not None else self.tol
         cb = progress_callback if progress_callback is not None else self.progress_callback
+
+        opt_type = (optimizer_type if optimizer_type is not None else self.optimizer_type).lower()
+        stype = (solver_type if solver_type is not None else self.solver_type).lower()
 
         opt_alpha = self.alpha
         if alpha is not None:
@@ -682,7 +1360,11 @@ class SIMPOptimizer3D:
         if forces is not None:
             force_vec = np.array(forces, dtype=np.float64)
         else:
-            if np.all(np.abs(self.force_vector) < 1e-12):
+            has_thermal = (
+                len(self.fixed_thermal_nodes) > 0
+                or np.any(np.abs(self.heat_source_vector) > 1e-12)
+            )
+            if np.all(np.abs(self.force_vector) < 1e-12) and not has_thermal:
                 # Default load: downward tip load at center of right face
                 self.add_load(self.nelx, self.nely // 2, self.nelz // 2, fz=-100.0)
             force_vec = self.force_vector.copy()
@@ -697,233 +1379,271 @@ class SIMPOptimizer3D:
         if len(free_dofs) == 0:
             raise ValueError("All degrees of freedom are fixed; no free DOFs to solve.")
 
-        # 2. Design Variable Initialization
-        x = np.full(self.num_elements, self.volfrac, dtype=np.float64)
-        
-        if np.any(self.passive_solid):
-            x[self.passive_solid] = 1.0
+        if opt_type == "mma" and nlopt is not None:
+            # =========================================================================
+            # Method of Moving Asymptotes (MMA via nlopt.LD_MMA)
+            # =========================================================================
+            evaluator = _TOStateEvaluator(
+                optimizer=self,
+                free_dofs=free_dofs,
+                force_vec=force_vec,
+                max_iter=max_iterations,
+                tol=convergence_tol,
+                opt_alpha=opt_alpha,
+                mode=mode,
+                cb=cb,
+                solver_type=stype
+            )
 
-        xPhys = x.copy()
-        u_free_prev = None
+            n = self.num_elements
+            opt_mma = nlopt.opt(nlopt.LD_MMA, n)
 
-        c_history: List[float] = []
-        ch_history: List[float] = []
-        blf_history: List[float] = []
-        compliance = 0.0
-        iterations = 0
-
-        # Optimization Iteration Loop
-        for it in range(1, max_iterations + 1):
-            iterations = it
-
-            # 3. Density Filtering and Accelerated Heaviside Projection Continuation
-            # Ramps beta progressively to eliminate grey intermediate elements and produce slender chords
-            beta = float(min(32.0, 1.0 + it / 10.0))
-            eta = 0.5
-            denom = np.tanh(beta * eta) + np.tanh(beta * (1.0 - eta))
-
-            x_grid = x.reshape((self.nelz, self.nely, self.nelx))
-            conv_x = ndimage.convolve(x_grid, self.kernel, mode='constant', cval=0.0)
-            x_tilde = (conv_x / self.kernel_normalizer).ravel()
-
-            xPhys = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde - eta))) / denom
+            lb = np.full(n, 1e-3, dtype=np.float64)
+            ub = np.full(n, 1.0, dtype=np.float64)
             if np.any(self.passive_solid):
-                xPhys[self.passive_solid] = 1.0
+                lb[self.passive_solid] = 1.0
+                ub[self.passive_solid] = 1.0
+            opt_mma.set_lower_bounds(lb)
+            opt_mma.set_upper_bounds(ub)
 
-            # 4. Global Elasticity Assembly (Memory-Efficient)
-            E_elements = self.Emin + (xPhys ** self.penal) * (self.E0 - self.Emin)
-            
-            # Avoid np.outer which allocates a massive (num_elements, 576) intermediate matrix
-            sK = np.empty(self.num_elements * 576, dtype=np.float64)
-            k0_flat = self.k0.ravel()
-            for i in range(576):
-                sK[i::576] = E_elements * k0_flat[i]
+            def objective_callback(x: np.ndarray, grad: np.ndarray) -> float:
+                evaluator.evaluate(x)
+                if grad.size > 0:
+                    grad[:] = evaluator.dc_filtered / evaluator.C0
+                return float(evaluator.compliance / evaluator.C0)
 
-            K_full = sp.coo_matrix((sK, (self.iK, self.jK)), shape=(self.num_dofs, self.num_dofs)).tocsr()
-            K_free = K_full[free_dofs, :][:, free_dofs]
-            F_free = force_vec[free_dofs]
+            def volume_constraint_callback(x: np.ndarray, grad: np.ndarray) -> float:
+                evaluator.evaluate(x)
+                if grad.size > 0:
+                    grad[:] = evaluator.dv_filtered / evaluator.opt.num_elements
+                return float(np.mean(evaluator.xPhys) - evaluator.opt.volfrac)
 
-            # 5. Linear Elasticity Solve
-            solve_K = None
-            if self.solver_type == "direct":
-                solve_K = sla.factorized(K_free.tocsc())
-                u_free = solve_K(F_free)
-            else:
-                diag_K = K_free.diagonal()
-                diag_safe = np.where(np.abs(diag_K) > 1e-12, diag_K, 1.0)
-                M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=K_free.shape, format="csr")
+            opt_mma.set_min_objective(objective_callback)
+            opt_mma.add_inequality_constraint(volume_constraint_callback, 1e-4)
+            opt_mma.set_maxeval(max_iterations)
+            opt_mma.set_xtol_rel(1e-4)
+
+            x0 = np.full(n, self.volfrac, dtype=np.float64)
+            if np.any(self.passive_solid):
+                x0[self.passive_solid] = 1.0
+            x0 = np.clip(x0, lb, ub)
+
+            try:
+                x_opt = opt_mma.optimize(x0)
+                if not np.allclose(x_opt, evaluator.last_x, atol=1e-14):
+                    evaluator.evaluate(x_opt)
+            except nlopt.ForcedStop:
+                pass
+            except Exception as e:
+                if evaluator.it == 0:
+                    raise e
+
+            iterations = evaluator.it
+            xPhys = evaluator.xPhys
+            compliance = evaluator.compliance
+            c_history = evaluator.c_history
+            ch_history = evaluator.ch_history
+            blf_history = evaluator.blf_history
+            U = evaluator.U
+            T_res = evaluator.T
+
+        else:
+            # =========================================================================
+            # Fallback: Optimality Criteria (OC) Bisection Update Loop
+            # =========================================================================
+            has_thermal = (
+                len(self.fixed_thermal_nodes) > 0
+                or np.any(np.abs(self.heat_source_vector) > 1e-12)
+            )
+            T_res = None
+            x = np.full(self.num_elements, self.volfrac, dtype=np.float64)
+            if np.any(self.passive_solid):
+                x[self.passive_solid] = 1.0
+
+            xPhys = x.copy()
+            u_free_prev = None
+
+            c_history: List[float] = []
+            ch_history: List[float] = []
+            blf_history: List[float] = []
+            compliance = 0.0
+            iterations = 0
+
+            for it in range(1, max_iterations + 1):
+                iterations = it
+
+                beta = float(min(32.0, 1.0 + it / 10.0))
+                eta = 0.5
+                denom = np.tanh(beta * eta) + np.tanh(beta * (1.0 - eta))
+
+                x_grid = x.reshape((self.nelz, self.nely, self.nelx))
+                conv_x = ndimage.convolve(x_grid, self.kernel, mode='constant', cval=0.0)
+                x_tilde = (conv_x / self.kernel_normalizer).ravel()
+
+                xPhys = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde - eta))) / denom
+                if np.any(self.passive_solid):
+                    xPhys[self.passive_solid] = 1.0
+
+                if has_thermal:
+                    T_res = self.solve_thermal(xPhys, solver_type=stype)
+                    T_e = T_res[self.edofMat_th]
+                    dT_elements = np.mean(T_e, axis=1) - self.T_ref
+                    F_th = self.assemble_thermal_load_vector(xPhys, dT_elements, q_ramp=8.0)
+                    F_total = force_vec + F_th
+                    F_free = F_total[free_dofs]
+                else:
+                    F_free = force_vec[free_dofs]
+
+                K_full = self.assemble_elastic_stiffness(xPhys)
+                K_free = K_full[free_dofs, :][:, free_dofs]
 
                 x0 = u_free_prev if (u_free_prev is not None and len(u_free_prev) == len(free_dofs)) else None
-                u_free, exit_code = sla.cg(K_free, F_free, x0=x0, M=M_jacobi, rtol=1e-5, maxiter=3000)
-                if exit_code != 0:
-                    u_free = sla.spsolve(K_free, F_free)
+                u_free, _, _ = self.solve_linear_system(K_free, F_free, x0=x0, solver_type=stype)
+                u_free_prev = u_free.copy()
 
-            u_free_prev = u_free.copy()
-            U = np.zeros(self.num_dofs, dtype=np.float64)
-            U[free_dofs] = u_free
+                U = np.zeros(self.num_dofs, dtype=np.float64)
+                U[free_dofs] = u_free
 
-            # 6. Compliance and Strain Energy
-            U_e = U[self.edofMat]
-            ce = np.sum((U_e @ self.k0) * U_e, axis=1)
-            compliance = float(np.sum(E_elements * ce))
-            c_history.append(compliance)
+                U_e = U[self.edofMat]
+                E_elements = self.Emin + (xPhys ** self.penal) * (self.E0 - self.Emin)
+                ce = np.sum((U_e @ self.k0) * U_e, axis=1)
+                compliance = float(np.sum(E_elements * ce))
+                c_history.append(compliance)
 
-            # Raw compliance sensitivity: dC/dxPhys = - penal * (E0 - Emin) * xPhys^(penal-1) * ce
-            dc_comp = -self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0)) * ce
+                if has_thermal:
+                    P = self.solve_thermal_adjoint(xPhys, U, solver_type=stype)
+                    dc_comp, _, _, _ = self.compute_thermo_elastic_sensitivities(
+                        xPhys, U, T_res, P, q_ramp=8.0, penal_th=3.0, solver_type=stype
+                    )
+                else:
+                    dc_comp = -self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0)) * ce
 
-            # 7. Linearized Buckling Analysis (if coupled)
-            if opt_alpha > 0.0 or mode == "buckling_max":
-                sigma_all = U_e @ self.DB0_T  # shape (num_elements, 6)
-                E_G = self.E0 * (xPhys ** self.penal_g)
+                if opt_alpha > 0.0 or mode == "buckling_max":
+                    sigma_all = U_e @ self.DB0_T
+                    E_G = (xPhys ** self.penal_g)
 
-                # Memory-efficient geometric stiffness assembly avoiding massive 2D arrays
-                sG = np.zeros(self.num_elements * 576, dtype=np.float64)
-                for k in range(6):
-                    basis_flat = self.G0_bases_arr[k].ravel()
-                    term = sigma_all[:, k] * E_G
-                    for i in range(576):
-                        if basis_flat[i] != 0.0:
-                            sG[i::576] += term * basis_flat[i]
+                    G_full = self.assemble_geometric_stiffness(xPhys, sigma_all)
+                    G_free = G_full[free_dofs, :][:, free_dofs]
 
-                G_full = sp.coo_matrix((sG, (self.iK, self.jK)), shape=(self.num_dofs, self.num_dofs)).tocsr()
-                G_free = G_full[free_dofs, :][:, free_dofs]
+                    try:
+                        k_req = min(5, G_free.shape[0] - 2)
+                        if k_req > 0:
+                            sigma = 1e-6
+                            A_shift = K_free + sigma * G_free
+                            diag_A = A_shift.diagonal()
+                            diag_safe = np.where(np.abs(diag_A) > 1e-12, diag_A, 1.0)
+                            M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=A_shift.shape, format="csr")
 
-                try:
-                    k_req = min(5, G_free.shape[0] - 2)
-                    if k_req > 0:
-                        sigma = 1e-6
-                        # We want the smallest positive lambda_buckle in (K + lambda_buckle * G) x = 0
-                        # This means K x = mu (-G) x, where mu = lambda_buckle. We want smallest positive mu.
-                        # Using A=K, M=-G, sigma=1e-6, mode='buckling' finds exactly this.
-                        # The shifted matrix is A - sigma M = K - sigma * (-G) = K + sigma * G
-                        A_shift = K_free + sigma * G_free
-                        diag_A = A_shift.diagonal()
-                        diag_safe = np.where(np.abs(diag_A) > 1e-12, diag_A, 1.0)
-                        M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=A_shift.shape, format="csr")
+                            def matvec_shift(b):
+                                x_sh, _ = sla.cg(A_shift, b, M=M_jacobi, rtol=1e-5, maxiter=2000)
+                                return x_sh
 
-                        def matvec_shift(b):
-                            x, _ = sla.cg(A_shift, b, M=M_jacobi, rtol=1e-5, maxiter=2000)
-                            return x
-                        
-                        OPinv = sla.LinearOperator(matvec=matvec_shift, shape=A_shift.shape, dtype=float)
-                        
-                        evals, evecs = sla.eigsh(K_free, M=-G_free, k=k_req, sigma=sigma, OPinv=OPinv, mode='buckling', which='LM', tol=1e-3, maxiter=1000)
-                        # evals are mu = lambda_buckle. The original code expected mu_all = 1/lambda_buckle.
-                        # Original code: mu_all = -evals_original (where evals_original = -1/lambda_buckle).
-                        # So original mu_all = 1/lambda_buckle.
-                        # Since our evals are lambda_buckle directly, we need mu_all = 1.0 / evals
-                        mu_all = 1.0 / evals
-                        idx_sort = np.argsort(mu_all)[::-1]
-                        mu_1 = float(mu_all[idx_sort[0]])
-                        phi_free = evecs[:, idx_sort[0]].copy()
-                        norm_phi = np.sqrt(np.maximum(1e-16, phi_free @ (K_free @ phi_free)))
-                        phi_free /= norm_phi
-                    else:
+                            OPinv = sla.LinearOperator(matvec=matvec_shift, shape=A_shift.shape, dtype=float)
+                            evals, evecs = sla.eigsh(
+                                K_free, M=-G_free, k=k_req, sigma=sigma, OPinv=OPinv,
+                                mode='buckling', which='LM', tol=1e-3, maxiter=1000
+                            )
+                            mu_all = 1.0 / evals
+                            idx_sort = np.argsort(mu_all)[::-1]
+                            mu_1 = float(mu_all[idx_sort[0]])
+                            phi_free = evecs[:, idx_sort[0]].copy()
+                            norm_phi = np.sqrt(np.maximum(1e-16, phi_free @ (K_free @ phi_free)))
+                            phi_free /= norm_phi
+                        else:
+                            mu_1 = 1e-6
+                            phi_free = np.ones(len(free_dofs)) / np.sqrt(max(1, len(free_dofs)))
+                    except Exception:
                         mu_1 = 1e-6
                         phi_free = np.ones(len(free_dofs)) / np.sqrt(max(1, len(free_dofs)))
-                except Exception:
-                    mu_1 = 1e-6
-                    phi_free = np.ones(len(free_dofs)) / np.sqrt(max(1, len(free_dofs)))
 
-                blf = 1.0 / mu_1 if mu_1 > 1e-12 else 1e12
-                blf_history.append(float(blf))
+                    blf = 1.0 / mu_1 if mu_1 > 1e-12 else 1e12
+                    blf_history.append(float(blf))
 
-                phi = np.zeros(self.num_dofs, dtype=np.float64)
-                phi[free_dofs] = phi_free
-                phi_e = phi[self.edofMat]
+                    phi = np.zeros(self.num_dofs, dtype=np.float64)
+                    phi[free_dofs] = phi_free
+                    phi_e = phi[self.edofMat]
 
-                P_e = np.zeros((self.num_elements, 6), dtype=np.float64)
-                for k in range(6):
-                    P_e[:, k] = np.sum((phi_e @ self.G0_bases_arr[k]) * phi_e, axis=1)
+                    P_e = np.zeros((self.num_elements, 6), dtype=np.float64)
+                    for k in range(6):
+                        P_e[:, k] = np.sum((phi_e @ self.G0_bases_arr[k]) * phi_e, axis=1)
 
-                phi_kGe_phi = np.sum(sigma_all * P_e, axis=1)
-                term1 = (self.penal_g * self.E0 * (xPhys ** (self.penal_g - 1.0))) * phi_kGe_phi
+                    phi_kGe_phi = np.sum(sigma_all * P_e, axis=1)
+                    term1 = (self.opt.penal_g * (xPhys ** (self.opt.penal_g - 1.0))) * phi_kGe_phi
 
-                phi_k0_phi = np.sum((phi_e @ self.k0) * phi_e, axis=1)
-                term2 = mu_1 * (self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0))) * phi_k0_phi
+                    phi_k0_phi = np.sum((phi_e @ self.k0) * phi_e, axis=1)
+                    term2 = mu_1 * (self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0))) * phi_k0_phi
 
-                adj_L_e = (P_e @ (self.D @ self.B0)) * E_G[:, None]
-                F_adj = np.zeros(self.num_dofs, dtype=np.float64)
-                np.add.at(F_adj, self.edofMat, adj_L_e)
+                    adj_L_e = (P_e @ (self.D @ self.B0)) * E_G[:, None]
+                    F_adj = np.zeros(self.num_dofs, dtype=np.float64)
+                    np.add.at(F_adj, self.edofMat, adj_L_e)
 
-                if solve_K is not None:
-                    w_free = solve_K(F_adj[free_dofs])
+                    w_free, _, _ = self.solve_linear_system(K_free, F_adj[free_dofs], solver_type=stype)
+                    w = np.zeros(self.num_dofs, dtype=np.float64)
+                    w[free_dofs] = w_free
+                    w_e = w[self.edofMat]
+
+                    w_k0_u = np.sum((w_e @ self.k0) * U_e, axis=1)
+                    term3 = (self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0))) * w_k0_u
+
+                    d_mu = -(term1 + term2 - term3)
+
+                    scale_comp = float(np.mean(np.abs(dc_comp)))
+                    scale_mu = float(np.mean(np.abs(d_mu)))
+                    if scale_comp < 1e-12: scale_comp = 1.0
+                    if scale_mu < 1e-12: scale_mu = 1.0
+
+                    sens_comp = dc_comp / scale_comp
+                    sens_mu = d_mu / scale_mu
+                    effective_alpha = float(np.clip(opt_alpha if opt_alpha > 0.0 else 0.4, 0.0, 0.95))
+                    sens_total = (1.0 - effective_alpha) * sens_comp + effective_alpha * sens_mu
                 else:
-                    diag_K = K_free.diagonal()
-                    diag_safe = np.where(np.abs(diag_K) > 1e-12, diag_K, 1.0)
-                    M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=K_free.shape, format="csr")
-                    w_free, _ = sla.cg(K_free, F_adj[free_dofs], M=M_jacobi, rtol=1e-5, maxiter=2000)
+                    sens_total = dc_comp
 
-                w = np.zeros(self.num_dofs, dtype=np.float64)
-                w[free_dofs] = w_free
-                w_e = w[self.edofMat]
+                dxPhys_dxtilde = beta * (1.0 - np.tanh(beta * (x_tilde - eta)) ** 2) / denom
 
-                w_k0_u = np.sum((w_e @ self.k0) * U_e, axis=1)
-                term3 = (self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0))) * w_k0_u
+                q_obj = (sens_total * dxPhys_dxtilde).reshape((self.nelz, self.nely, self.nelx))
+                conv_q = ndimage.convolve(q_obj / self.kernel_normalizer, self.kernel, mode='constant', cval=0.0)
+                dc_filtered = conv_q.ravel()
 
-                d_mu = -(term1 + term2 - term3)
+                q_vol = dxPhys_dxtilde.reshape((self.nelz, self.nely, self.nelx))
+                conv_v = ndimage.convolve(q_vol / self.kernel_normalizer, self.kernel, mode='constant', cval=0.0)
+                dv_filtered = conv_v.ravel()
 
-                # Dynamic L1 gradient normalization
-                scale_comp = float(np.mean(np.abs(dc_comp)))
-                scale_mu = float(np.mean(np.abs(d_mu)))
-                if scale_comp < 1e-12: scale_comp = 1.0
-                if scale_mu < 1e-12: scale_mu = 1.0
+                l1, l2, move = 1e-9, 1e9, 0.2
+                dv_safe = np.maximum(1e-12, dv_filtered)
 
-                sens_comp = dc_comp / scale_comp
-                sens_mu = d_mu / scale_mu
+                while (l2 - l1) / (l1 + l2 + 1e-12) > 1e-4:
+                    lmid = 0.5 * (l1 + l2)
+                    Be = np.sqrt(np.maximum(0.0, -dc_filtered / (lmid * dv_safe)))
+                    xnew = np.clip(x * Be, np.maximum(0.001, x - move), np.minimum(1.0, x + move))
+                    if np.any(self.passive_solid):
+                        xnew[self.passive_solid] = 1.0
 
-                effective_alpha = float(np.clip(opt_alpha if opt_alpha > 0.0 else 0.4, 0.0, 0.95))
-                sens_total = (1.0 - effective_alpha) * sens_comp + effective_alpha * sens_mu
-            else:
-                sens_total = dc_comp
+                    xnew_grid = xnew.reshape((self.nelz, self.nely, self.nelx))
+                    conv_new = ndimage.convolve(xnew_grid, self.kernel, mode='constant', cval=0.0)
+                    x_tilde_new = (conv_new / self.kernel_normalizer).ravel()
+                    xPhys_new = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde_new - eta))) / denom
+                    if np.any(self.passive_solid):
+                        xPhys_new[self.passive_solid] = 1.0
 
-            # 8. Sensitivity Filtering & Chain Rule Back-Propagation
-            dxPhys_dxtilde = beta * (1.0 - np.tanh(beta * (x_tilde - eta))**2) / denom
+                    if np.mean(xPhys_new) > self.volfrac:
+                        l1 = lmid
+                    else:
+                        l2 = lmid
 
-            q_obj = (sens_total * dxPhys_dxtilde).reshape((self.nelz, self.nely, self.nelx))
-            conv_q = ndimage.convolve(q_obj / self.kernel_normalizer, self.kernel, mode='constant', cval=0.0)
-            dc_filtered = conv_q.ravel()
+                change = float(np.max(np.abs(xnew - x)))
+                ch_history.append(change)
+                x = xnew.copy()
+                xPhys = xPhys_new.copy()
 
-            q_vol = dxPhys_dxtilde.reshape((self.nelz, self.nely, self.nelx))
-            conv_v = ndimage.convolve(q_vol / self.kernel_normalizer, self.kernel, mode='constant', cval=0.0)
-            dv_filtered = conv_v.ravel()
+                if cb is not None:
+                    try:
+                        cb(it, max_iterations, compliance, float(np.mean(xPhys)))
+                    except TypeError:
+                        cb(it, max_iterations)
 
-            # 9. Optimality Criteria (OC) Bisection Density Update
-            l1, l2, move = 1e-9, 1e9, 0.2
-            dv_safe = np.maximum(1e-12, dv_filtered)
-
-            while (l2 - l1) / (l1 + l2 + 1e-12) > 1e-4:
-                lmid = 0.5 * (l1 + l2)
-                Be = np.sqrt(np.maximum(0.0, -dc_filtered / (lmid * dv_safe)))
-                xnew = np.clip(x * Be, np.maximum(0.001, x - move), np.minimum(1.0, x + move))
-                if np.any(self.passive_solid):
-                    xnew[self.passive_solid] = 1.0
-
-                xnew_grid = xnew.reshape((self.nelz, self.nely, self.nelx))
-                conv_new = ndimage.convolve(xnew_grid, self.kernel, mode='constant', cval=0.0)
-                x_tilde_new = (conv_new / self.kernel_normalizer).ravel()
-                xPhys_new = (np.tanh(beta * eta) + np.tanh(beta * (x_tilde_new - eta))) / denom
-                if np.any(self.passive_solid):
-                    xPhys_new[self.passive_solid] = 1.0
-
-                if np.mean(xPhys_new) > self.volfrac:
-                    l1 = lmid
-                else:
-                    l2 = lmid
-
-            change = float(np.max(np.abs(xnew - x)))
-            ch_history.append(change)
-            x = xnew.copy()
-            xPhys = xPhys_new.copy()
-
-            if cb is not None:
-                try:
-                    cb(it, max_iterations, compliance, float(np.mean(xPhys)))
-                except TypeError:
-                    cb(it, max_iterations)
-
-            if change < convergence_tol:
-                break
+                if change < convergence_tol:
+                    break
 
         exec_time = time.time() - start_time
         density_matrix = xPhys.reshape((self.nelz, self.nely, self.nelx))
@@ -963,5 +1683,6 @@ class SIMPOptimizer3D:
             dy=self.dy,
             dz=self.dz,
             displacements=U,
-            stresses=stresses_3d
+            stresses=stresses_3d,
+            temperatures=T_res
         )
