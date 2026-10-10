@@ -65,3 +65,8 @@ outputs/*.obj
 
 # Teamwork subagent logs
 .agents/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out

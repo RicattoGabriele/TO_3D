@@ -256,6 +256,8 @@ def build_domain_preview_figure(
     fixed_nodes_coords: List[Tuple[float, float, float, str]],
     applied_loads: List[Tuple[float, float, float, float, float, float]],
     passive_boxes: List[Tuple[float, float, float, float, float, float]] = None,
+    fixed_temp_coords: List[Tuple[float, float, float, float]] = None,
+    applied_heats: List[Tuple[float, float, float, float]] = None,
     res: Optional[SIMPResult3D] = None,
     threshold: float = 0.35,
     view_mode: str = "preview",
@@ -264,6 +266,10 @@ def build_domain_preview_figure(
     stress_colormap: str = "Turbo",
     stress_field_name: str = "Von Mises"
 ) -> go.Figure:
+    if isinstance(fixed_temp_coords, SIMPResult3D):
+        res = fixed_temp_coords
+        fixed_temp_coords = None
+
     Lx = float(nelx * dx)
     Ly = float(nely * dy)
     Lz = float(nelz * dz)
@@ -319,20 +325,21 @@ def build_domain_preview_figure(
                 name='Non-Design Space'
             ))
 
-    # Faint domain shading
-    fig.add_trace(go.Mesh3d(
-        x=[0, Lx, Lx, 0, 0, Lx, Lx, 0],
-        y=[0, 0, Ly, Ly, 0, 0, Ly, Ly],
-        z=[0, 0, 0, 0, Lz, Lz, Lz, Lz],
-        i=[0, 0, 4, 4, 0, 0, 1, 1, 0, 0, 2, 2],
-        j=[1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 3, 7],
-        k=[2, 3, 6, 7, 5, 4, 6, 5, 7, 4, 7, 6],
-        color="#27272a",
-        opacity=0.03,
-        name="Volume",
-        hoverinfo="skip",
-        showlegend=False
-    ))
+    # Faint domain shading (preview only)
+    if view_mode == "preview" or res is None:
+        fig.add_trace(go.Mesh3d(
+            x=[0, Lx, Lx, 0, 0, Lx, Lx, 0],
+            y=[0, 0, Ly, Ly, 0, 0, Ly, Ly],
+            z=[0, 0, 0, 0, Lz, Lz, Lz, Lz],
+            i=[0, 0, 4, 4, 0, 0, 1, 1, 0, 0, 2, 2],
+            j=[1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 3, 7],
+            k=[2, 3, 6, 7, 5, 4, 6, 5, 7, 4, 7, 6],
+            color="#27272a",
+            opacity=0.03,
+            name="Volume",
+            hoverinfo="skip",
+            showlegend=False
+        ))
 
     # 2. Fixed Support Markers (Small, discrete cyan squares: size=3.5)
     if fixed_nodes_coords:
@@ -396,14 +403,122 @@ def build_domain_preview_figure(
                 showlegend=False
             ))
 
+    # 3b. Fixed Temperature Markers (Delicate amber squares: size=3.5)
+    if fixed_temp_coords:
+        th_x = [pt[0] for pt in fixed_temp_coords]
+        th_y = [pt[1] for pt in fixed_temp_coords]
+        th_z = [pt[2] for pt in fixed_temp_coords]
+        th_hover = [f"Fixed Temp ({pt[0]:.1f}, {pt[1]:.1f}, {pt[2]:.1f}) mm<br>T = {pt[3]:.1f} K" for pt in fixed_temp_coords]
+        fig.add_trace(go.Scatter3d(
+            x=th_x, y=th_y, z=th_z,
+            mode="markers",
+            marker=dict(size=3.5, color="#f59e0b", symbol="square", opacity=0.95),
+            text=th_hover,
+            hoverinfo="text",
+            name="Fixed Temp",
+            showlegend=False
+        ))
+
+    # 3c. Applied Heat Sources (Delicate crimson diamonds: size=4.0)
+    if applied_heats:
+        for idx, (hx, hy, hz, q_val) in enumerate(applied_heats):
+            fig.add_trace(go.Scatter3d(
+                x=[hx], y=[hy], z=[hz],
+                mode="markers",
+                marker=dict(size=4.0, color="#ef4444", symbol="diamond", opacity=1.0),
+                text=[f"Heat Source #{idx+1}: Q = {q_val:.1f} W<br>Point: ({hx:.1f}, {hy:.1f}, {hz:.1f}) mm"],
+                hoverinfo="text",
+                name=f"Heat Source #{idx+1}",
+                showlegend=False
+            ))
+
     # 4. Topology Mesh (Exact Watertight CAD Faces via Trimesh Extraction + Taubin Smoothing)
-    if res is not None and view_mode in ["stress", "result", "cad"]:
+    if res is not None and view_mode in ["stress", "temperature", "temp", "result", "cad"]:
         try:
             m = res.get_boundary_mesh(threshold=threshold, smooth_iterations=smooth_iterations)
             if len(m.vertices) > 0 and len(m.faces) > 0:
                 vx, vy, vz = m.vertices[:, 0], m.vertices[:, 1], m.vertices[:, 2]
 
-                if view_mode == "stress" and res.stresses is not None and "sigma_signed" in res.stresses:
+                if view_mode in ["temperature", "temp"]:
+                    # Extract temperature field from result
+                    t_field = getattr(res, "temperature_field", None)
+                    if t_field is None:
+                        t_field = getattr(res, "temperatures", None)
+
+                    if t_field is not None:
+                        try:
+                            from scipy.ndimage import map_coordinates
+                            if t_field.ndim == 3 and t_field.shape == (nelz, nely, nelx):
+                                coords = np.array([vz / dz - 0.5, vy / dy - 0.5, vx / dx - 0.5])
+                                v_temp = map_coordinates(t_field, coords, order=1, mode='nearest')
+                            elif t_field.ndim == 1 and t_field.size == (nelx + 1) * (nely + 1) * (nelz + 1):
+                                t_grid = t_field.reshape((nelx + 1, nely + 1, nelz + 1))
+                                coords = np.array([vx / dx, vy / dy, vz / dz])
+                                v_temp = map_coordinates(t_grid, coords, order=1, mode='nearest')
+                            elif t_field.ndim == 1 and t_field.size == nelx * nely * nelz:
+                                t_grid = t_field.reshape((nelz, nely, nelx))
+                                coords = np.array([vz / dz - 0.5, vy / dy - 0.5, vx / dx - 0.5])
+                                v_temp = map_coordinates(t_grid, coords, order=1, mode='nearest')
+                            else:
+                                coords = np.array([vx / dx, vy / dy, vz / dz])
+                                v_temp = map_coordinates(t_field, coords, order=1, mode='nearest')
+                        except Exception:
+                            if t_field.size == (nelx + 1) * (nely + 1) * (nelz + 1):
+                                ix = np.clip(np.round(vx / dx).astype(int), 0, nelx)
+                                iy = np.clip(np.round(vy / dy).astype(int), 0, nely)
+                                iz = np.clip(np.round(vz / dz).astype(int), 0, nelz)
+                                nid = ix * (nely + 1) * (nelz + 1) + iy * (nelz + 1) + iz
+                                v_temp = t_field.ravel()[np.clip(nid, 0, len(t_field.ravel()) - 1)]
+                            else:
+                                ix = np.clip(np.floor(vx / dx).astype(int), 0, nelx - 1)
+                                iy = np.clip(np.floor(vy / dy).astype(int), 0, nely - 1)
+                                iz = np.clip(np.floor(vz / dz).astype(int), 0, nelz - 1)
+                                if t_field.ndim == 3 and t_field.shape == (nelz, nely, nelx):
+                                    v_temp = t_field[iz, iy, ix]
+                                else:
+                                    v_temp = t_field.ravel()[np.clip(iz * nelx * nely + iy * nelx + ix, 0, t_field.size - 1)]
+
+                        t_min = float(np.min(v_temp))
+                        t_max = float(np.max(v_temp))
+                        if abs(t_max - t_min) < 1e-4:
+                            t_max = t_min + 1.0
+
+                        temp_mesh = go.Mesh3d(
+                            x=vx, y=vy, z=vz,
+                            i=m.faces[:, 0], j=m.faces[:, 1], k=m.faces[:, 2],
+                            intensity=v_temp,
+                            colorscale="Inferno",
+                            cmin=t_min,
+                            cmax=t_max,
+                            colorbar=dict(
+                                title=dict(text="T (°C / K)", font=dict(color="#ffffff", size=9, family="Inconsolata")),
+                                tickfont=dict(color="#71717a", size=8, family="Inconsolata"),
+                                len=0.50,
+                                x=1.02
+                            ),
+                            opacity=0.98,
+                            flatshading=(smooth_iterations == 0),
+                            lighting=dict(ambient=0.5, diffuse=0.8, specular=0.2),
+                            name="Temperature",
+                            showlegend=False
+                        )
+                        fig.add_trace(temp_mesh)
+                        try:
+                            fig.data[-1]._props["colorscale"] = "Inferno"
+                        except Exception:
+                            pass
+                    else:
+                        fig.add_trace(go.Mesh3d(
+                            x=vx, y=vy, z=vz,
+                            i=m.faces[:, 0], j=m.faces[:, 1], k=m.faces[:, 2],
+                            color="#38bdf8",
+                            opacity=0.96,
+                            flatshading=(smooth_iterations == 0),
+                            lighting=dict(ambient=0.45, diffuse=0.8, specular=0.2),
+                            name="Topology",
+                            showlegend=False
+                        ))
+                elif view_mode == "stress" and res.stresses is not None and "sigma_signed" in res.stresses:
                     # Map signed stress to vertices (positive = tension/red, negative = compression/blue)
                     s_signed = res.stresses["sigma_signed"]
                     try:
@@ -557,7 +672,7 @@ with st.sidebar:
     custom_supports: List[Tuple[float, float, float, str]] = []
     parsed_supports = []
 
-    safe_dict = {"Lx": Lx, "Ly": Ly, "Lz": Lz}
+    safe_dict = {"Lx": Lx, "Ly": Ly, "Lz": Lz, "dx": dx, "dy": dy, "dz": dz}
     
     for line in supports_text.strip().split('\n'):
         line = line.split('#')[0].strip().upper()
@@ -673,13 +788,177 @@ with st.sidebar:
                 parsed_passive.append((xmin, xmax, ymin, ymax, zmin, zmax))
             except: pass
 
-    st.markdown('<div class="sec-head">5. PARAMETERS</div>', unsafe_allow_html=True)
+    # -------------------------------------------------------------------------
+    # 5. THERMAL BOUNDARY CONDITIONS
+    # -------------------------------------------------------------------------
+    st.markdown('<div class="sec-head">5. THERMAL BOUNDARY CONDITIONS</div>', unsafe_allow_html=True)
+    with st.expander("Thermal Syntax Guide", expanded=False):
+        st.markdown("""
+        **Fixed Temperatures:**
+        - `TEMP FACE <side> <T>`  
+          *(left, right, bottom, top, front, back)*
+        - `TEMP NODE X Y Z <T>`
+        - `TEMP BOX X1 X2 Y1 Y2 Z1 Z2 <T>`
+        
+        **Heat Sources:**
+        - `HEAT X Y Z Q`
+        - `HEAT BOX X1 X2 Y1 Y2 Z1 Z2 Q`
+        
+        *Tip: You can use variables `Lx, Ly, Lz` and math (e.g., `Lx/2`).*
+        """)
+
+    c_th1, c_th2 = st.columns(2)
+    T_ref = c_th1.number_input("T_ref (K)", value=0.0, step=5.0)
+    alpha_th = c_th2.number_input("α_th (1/K)", value=1.0e-5, format="%.1e", step=1e-6)
+
+    default_thermal = "# TEMP FACE left 0\n# TEMP FACE right 100\n# HEAT Lx/2 Ly/2 Lz/2 50\n"
+    thermal_text = st.text_area("Definitions (use Lx, Ly, Lz):", default_thermal, height=100, key="therm_txt")
+
+    parsed_thermal_faces = []
+    parsed_thermal_nodes = []
+    parsed_thermal_boxes = []
+    parsed_heat_sources = []
+    parsed_heat_boxes = []
+    custom_thermal_preview = []
+    custom_heat_preview = []
+
+    for line in thermal_text.strip().split('\n'):
+        line = line.split('#')[0].strip().upper()
+        if not line:
+            continue
+        parts = line.split()
+        cmd = parts[0]
+
+        if cmd == "TEMP" and len(parts) >= 3:
+            sub = parts[1]
+            if sub == "FACE" and len(parts) >= 4:
+                face_name = parts[2].lower()
+                try:
+                    import sympy
+                    t_val = float(sympy.sympify(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    parsed_thermal_faces.append((face_name, t_val))
+                    if face_name == "left":
+                        for j_idx in range(0, nely + 1, max(1, nely // 3)):
+                            for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
+                                custom_thermal_preview.append((0.0, j_idx * dy, k_idx * dz, t_val))
+                    elif face_name == "right":
+                        for j_idx in range(0, nely + 1, max(1, nely // 3)):
+                            for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
+                                custom_thermal_preview.append((Lx, j_idx * dy, k_idx * dz, t_val))
+                    elif face_name in ["bottom", "down"]:
+                        for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
+                            for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
+                                custom_thermal_preview.append((i_idx * dx, 0.0, k_idx * dz, t_val))
+                    elif face_name in ["top", "up"]:
+                        for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
+                            for k_idx in range(0, nelz + 1, max(1, nelz // 3)):
+                                custom_thermal_preview.append((i_idx * dx, Ly, k_idx * dz, t_val))
+                    elif face_name in ["front", "bottom_z"]:
+                        for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
+                            for j_idx in range(0, nely + 1, max(1, nely // 3)):
+                                custom_thermal_preview.append((i_idx * dx, j_idx * dy, 0.0, t_val))
+                    elif face_name in ["back", "top_z"]:
+                        for i_idx in range(0, nelx + 1, max(1, nelx // 3)):
+                            for j_idx in range(0, nely + 1, max(1, nely // 3)):
+                                custom_thermal_preview.append((i_idx * dx, j_idx * dy, Lz, t_val))
+                except Exception:
+                    pass
+            elif sub == "NODE" and len(parts) >= 6:
+                try:
+                    import sympy
+                    x = float(sympy.sympify(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    y = float(sympy.sympify(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    z = float(sympy.sympify(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    t_val = float(sympy.sympify(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    parsed_thermal_nodes.append((x, y, z, t_val))
+                    custom_thermal_preview.append((x, y, z, t_val))
+                except Exception:
+                    pass
+            elif sub == "BOX" and len(parts) >= 9:
+                try:
+                    import sympy
+                    x1 = float(sympy.sympify(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    x2 = float(sympy.sympify(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    y1 = float(sympy.sympify(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    y2 = float(sympy.sympify(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    z1 = float(sympy.sympify(parts[6].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    z2 = float(sympy.sympify(parts[7].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    t_val = float(sympy.sympify(parts[8].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    xmin, xmax = min(x1, x2), max(x1, x2)
+                    ymin, ymax = min(y1, y2), max(y1, y2)
+                    zmin, zmax = min(z1, z2), max(z1, z2)
+                    parsed_thermal_boxes.append((xmin, xmax, ymin, ymax, zmin, zmax, t_val))
+                    custom_thermal_preview.append((xmin, ymin, zmin, t_val))
+                    custom_thermal_preview.append((xmax, ymax, zmax, t_val))
+                except Exception:
+                    pass
+
+        elif cmd == "HEAT" and len(parts) >= 5:
+            if parts[1] == "BOX" and len(parts) >= 9:
+                try:
+                    import sympy
+                    x1 = float(sympy.sympify(parts[2].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    x2 = float(sympy.sympify(parts[3].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    y1 = float(sympy.sympify(parts[4].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    y2 = float(sympy.sympify(parts[5].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    z1 = float(sympy.sympify(parts[6].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    z2 = float(sympy.sympify(parts[7].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    q_val = float(sympy.sympify(parts[8].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    xmin, xmax = min(x1, x2), max(x1, x2)
+                    ymin, ymax = min(y1, y2), max(y1, y2)
+                    zmin, zmax = min(z1, z2), max(z1, z2)
+                    parsed_heat_boxes.append((xmin, xmax, ymin, ymax, zmin, zmax, q_val))
+                    custom_heat_preview.append(((xmin + xmax)/2, (ymin + ymax)/2, (zmin + zmax)/2, q_val))
+                except Exception:
+                    pass
+            else:
+                try:
+                    import sympy
+                    offset = 1 if parts[1] == "NODE" else 0
+                    x = float(sympy.sympify(parts[1 + offset].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    y = float(sympy.sympify(parts[2 + offset].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    z = float(sympy.sympify(parts[3 + offset].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    q_val = float(sympy.sympify(parts[4 + offset].replace("LX", "Lx").replace("LY", "Ly").replace("LZ", "Lz"), locals=safe_dict))
+                    parsed_heat_sources.append((x, y, z, q_val))
+                    custom_heat_preview.append((x, y, z, q_val))
+                except Exception:
+                    pass
+
+    # -------------------------------------------------------------------------
+    # 6. PARAMETERS & SOLVER CONTROLS
+    # -------------------------------------------------------------------------
+    st.markdown('<div class="sec-head">6. PARAMETERS</div>', unsafe_allow_html=True)
+    mode_options = [
+        "Compliance",
+        "Buckling Max",
+        "Thermo-Elastic Robustness",
+        "Heat Exchanger / Thermal Compliance"
+    ]
+    mode_choice = st.selectbox("Mode", mode_options, index=0)
+    MODE_MAP = {
+        "Compliance": "compliance",
+        "Buckling Max": "buckling_max",
+        "Thermo-Elastic Robustness": "thermo_elastic",
+        "Heat Exchanger / Thermal Compliance": "thermal_compliance"
+    }
+    mode_key = MODE_MAP[mode_choice]
+
     volfrac = st.slider("Volume (Vf)", 0.05, 0.80, 0.20, 0.05)
-    alpha = st.slider("Buckling (α)", 0.00, 0.90, 0.30, 0.05)
-    rmin = st.slider("Filter (Rmin)", 0.5, 6.0, 1.2, 0.1)
+    alpha = st.slider("Buckling (α)", 0.00, 0.90, 0.30, 0.05) if mode_key == "buckling_max" else 0.0
+    rmin = st.slider("Filter / Min Length (Rmin)", 0.5, 6.0, 1.2, 0.1)
     max_iter = st.slider("Iterations", 5, 80, 25, 5)
-    solver_opt = st.selectbox("Solver", ["PCG + Jacobi", "Direct"])
-    solver_key = "pcg" if "PCG" in solver_opt else "direct"
+
+    c_sol1, c_sol2 = st.columns(2)
+    optimizer_opt = c_sol1.selectbox("Optimizer", ["MMA", "OC"], index=0)
+    optimizer_key = optimizer_opt.lower()
+
+    solver_opt = c_sol2.selectbox("Linear Solver", ["AMG", "PCG + Jacobi", "Direct"], index=0)
+    if "AMG" in solver_opt:
+        solver_key = "amg"
+    elif "PCG" in solver_opt:
+        solver_key = "pcg"
+    else:
+        solver_key = "direct"
 
     st.write("")
     run_btn = st.button("RUN", type="primary", use_container_width=True)
@@ -701,8 +980,12 @@ if run_btn:
         E0=1.0, Emin=1e-9, nu=0.3,
         penal=3.0, penal_g=6.0,
         rmin=float(rmin), volfrac=float(volfrac),
-        solver_type=solver_key
+        solver_type=solver_key,
+        optimizer_type=optimizer_key,
+        T_ref=float(T_ref)
     )
+    if hasattr(opt, "alpha_th"):
+        opt.alpha_th = float(alpha_th)
 
     # Boundaries
     for sup in parsed_supports:
@@ -737,19 +1020,54 @@ if run_btn:
     for box in parsed_passive:
         opt.add_passive_box(*box, dx, dy, dz)
 
+    # Thermal Fixed Temperatures
+    for face_name, t_val in parsed_thermal_faces:
+        opt.fix_thermal_face(face_name, temp=t_val)
+    for x, y, z, t_val in parsed_thermal_nodes:
+        n_i = int(np.clip(round(x / dx), 0, nelx))
+        n_j = int(np.clip(round(y / dy), 0, nely))
+        n_k = int(np.clip(round(z / dz), 0, nelz))
+        opt.fix_thermal_node(n_i, n_j, n_k, temp=t_val)
+    for xmin, xmax, ymin, ymax, zmin, zmax, t_val in parsed_thermal_boxes:
+        for i in range(int(np.clip(round(xmin / dx), 0, nelx)), int(np.clip(round(xmax / dx), 0, nelx)) + 1):
+            for j in range(int(np.clip(round(ymin / dy), 0, nely)), int(np.clip(round(ymax / dy), 0, nely)) + 1):
+                for k in range(int(np.clip(round(zmin / dz), 0, nelz)), int(np.clip(round(zmax / dz), 0, nelz)) + 1):
+                    opt.fix_thermal_node(i, j, k, temp=t_val)
+
+    # Thermal Heat Sources
+    for x, y, z, q_val in parsed_heat_sources:
+        n_i = int(np.clip(round(x / dx), 0, nelx))
+        n_j = int(np.clip(round(y / dy), 0, nely))
+        n_k = int(np.clip(round(z / dz), 0, nelz))
+        opt.add_heat_source(n_i, n_j, n_k, q=q_val)
+    for xmin, xmax, ymin, ymax, zmin, zmax, q_val in parsed_heat_boxes:
+        i_min = int(np.clip(round(xmin / dx), 0, nelx))
+        i_max = int(np.clip(round(xmax / dx), 0, nelx))
+        j_min = int(np.clip(round(ymin / dy), 0, nely))
+        j_max = int(np.clip(round(ymax / dy), 0, nely))
+        k_min = int(np.clip(round(zmin / dz), 0, nelz))
+        k_max = int(np.clip(round(zmax / dz), 0, nelz))
+        count = (i_max - i_min + 1) * (j_max - j_min + 1) * (k_max - k_min + 1)
+        q_per_node = q_val / max(1, count)
+        for i in range(i_min, i_max + 1):
+            for j in range(j_min, j_max + 1):
+                for k in range(k_min, k_max + 1):
+                    opt.add_heat_source(i, j, k, q=q_per_node)
+
     def on_progress(it, max_it, comp=0.0, vol=0.0, *args):
         pct = int((it / max_it) * 100)
         progress_bar.progress(pct)
         status_holder.text(f"ITER {it:02d}/{max_it:02d} | C: {comp:.3e} | VF: {vol*100:.1f}%")
 
-    mode = "buckling_max" if alpha > 0.0 else "compliance"
     start_time = time.time()
     res = opt.solve(
         max_iter=int(max_iter),
         tol=0.015,
-        mode=mode,
+        mode=mode_key,
         alpha_buckling=float(alpha),
-        progress_callback=on_progress
+        progress_callback=on_progress,
+        optimizer_type=optimizer_key,
+        solver_type=solver_key
     )
     elapsed = time.time() - start_time
 
@@ -763,6 +1081,12 @@ if run_btn:
 # MAIN VIEWPORT: HEADER & TOOLBAR
 # -----------------------------------------------------------------------------
 has_result = ("res3d" in st.session_state and st.session_state["res3d"] is not None)
+has_temp = False
+if has_result:
+    res = st.session_state["res3d"]
+    if (hasattr(res, "temperatures") and res.temperatures is not None) or \
+       (hasattr(res, "temperature_field") and res.temperature_field is not None):
+        has_temp = True
 
 view_choice = "preview"
 threshold_val = 0.35
@@ -775,12 +1099,13 @@ if not has_result:
     st.markdown(f'<div style="font-size:0.85rem; color:#71717a; margin-bottom:0.5rem; letter-spacing:0.05em;">DOMINIO 3D: {Lx:.1f} × {Ly:.1f} × {Lz:.1f} mm | {nelx}×{nely}×{nelz} elements ({nelx*nely*nelz:,} voxels)</div>', unsafe_allow_html=True)
 else:
     # Full Result Toolbar
-    col_v1, col_v2, col_v3, col_v4 = st.columns([3, 2, 2, 1])
+    col_v1, col_v2, col_v3, col_v4 = st.columns([3.5, 2, 2, 1])
+    view_options = ["stress", "temperature", "cad"] if has_temp else ["stress", "cad"]
     view_choice = col_v1.radio(
         "VIEW",
-        ["stress", "cad"],
+        view_options,
         index=0,
-        format_func=lambda x: "STRESS" if x=="stress" else "CAD",
+        format_func=lambda x: "TEMP" if x=="temperature" else ("STRESS" if x=="stress" else "CAD"),
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -799,6 +1124,8 @@ preview_fig = build_domain_preview_figure(
     fixed_nodes_coords=custom_supports,
     applied_loads=applied_loads,
     passive_boxes=parsed_passive,
+    fixed_temp_coords=custom_thermal_preview,
+    applied_heats=custom_heat_preview,
     res=st.session_state.get("res3d", None),
     threshold=threshold_val,
     view_mode=view_choice if has_result else "preview",
@@ -833,6 +1160,16 @@ if has_result:
         s1.metric("Max Von Mises", f"{float(np.max(vm)):.2f} MPa")
         s2.metric("Min Comp (σ3)", f"{float(np.min(s3_min)):.2f} MPa")
         s3.metric("Max Tens (σ1)", f"{float(np.max(s1_max)):.2f} MPa")
+
+    if has_temp:
+        t_field = getattr(res, "temperature_field", None)
+        if t_field is None:
+            t_field = getattr(res, "temperatures", None)
+        if t_field is not None:
+            th1, th2, th3 = st.columns(3)
+            th1.metric("Max Temp", f"{float(np.max(t_field)):.1f} K")
+            th2.metric("Min Temp", f"{float(np.min(t_field)):.1f} K")
+            th3.metric("Avg Temp", f"{float(np.mean(t_field)):.1f} K")
 
     col_chart, col_stl = st.columns([1, 1])
 

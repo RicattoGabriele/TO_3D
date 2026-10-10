@@ -338,6 +338,7 @@ class SIMPResult3D:
     displacements: Optional[np.ndarray] = None
     stresses: Optional[Dict[str, np.ndarray]] = None
     temperatures: Optional[np.ndarray] = None
+    temperature_field: Optional[np.ndarray] = None
 
     def export_voxel_stl(self, filepath: str, threshold: float = 0.5) -> str:
         """
@@ -521,7 +522,15 @@ class _TOStateEvaluator:
         self.max_iter = max_iter
         self.tol = tol
         self.opt_alpha = opt_alpha
-        self.mode = mode
+        mode_str = mode.lower().strip() if isinstance(mode, str) else "compliance"
+        if "thermal_compliance" in mode_str or "heat_exchanger" in mode_str:
+            self.mode = "thermal_compliance"
+        elif "thermo_elastic" in mode_str or "thermoelastic" in mode_str:
+            self.mode = "thermo_elastic"
+        elif "buckling" in mode_str:
+            self.mode = "buckling_max"
+        else:
+            self.mode = "compliance"
         self.cb = cb
         self.solver_type = solver_type
 
@@ -529,6 +538,7 @@ class _TOStateEvaluator:
         self.has_thermal = (
             len(self.opt.fixed_thermal_nodes) > 0
             or np.any(np.abs(self.opt.heat_source_vector) > 1e-12)
+            or self.mode in ["thermo_elastic", "thermal_compliance"]
         )
         self.T: Optional[np.ndarray] = None
         self.P: Optional[np.ndarray] = None
@@ -576,50 +586,59 @@ class _TOStateEvaluator:
             xPhys[self.opt.passive_solid] = 1.0
 
         # 3. Finite Element Assembly & Sparse Linear Solve
-        if self.has_thermal:
-            # 3a. Thermal Forward Solve: K_th T = Q
+        if self.mode == "thermal_compliance":
+            # 3a. Pure thermal compliance mode: solve Poisson heat equation and bypass mechanical FEA
             T = self.opt.solve_thermal(xPhys, solver_type=self.solver_type)
-            T_e = T[self.opt.edofMat_th]
-            dT_elements = np.mean(T_e, axis=1) - self.opt.T_ref
-            F_th = self.opt.assemble_thermal_load_vector(xPhys, dT_elements, q_ramp=8.0)
-            F_total = self.force_vec + F_th
-            F_free = F_total[self.free_dofs]
             self.T = T
-            self.dT_elements = dT_elements
-            self.F_th = F_th
+            C_th, dc_th = self.opt.compute_thermal_compliance(xPhys, T, penal_th=3.0)
+            compliance = C_th
+            dc_comp = dc_th
+            U = np.zeros(self.opt.num_dofs, dtype=np.float64)
         else:
-            F_free = self.force_vec[self.free_dofs]
+            if self.has_thermal or self.mode == "thermo_elastic":
+                # 3b. Coupled Thermal Forward Solve: K_th T = Q
+                T = self.opt.solve_thermal(xPhys, solver_type=self.solver_type)
+                T_e = T[self.opt.edofMat_th]
+                dT_elements = np.mean(T_e, axis=1) - self.opt.T_ref
+                F_th = self.opt.assemble_thermal_load_vector(xPhys, dT_elements, q_ramp=8.0)
+                F_total = self.force_vec + F_th
+                F_free = F_total[self.free_dofs]
+                self.T = T
+                self.dT_elements = dT_elements
+                self.F_th = F_th
+            else:
+                F_free = self.force_vec[self.free_dofs]
 
-        K_full = self.opt.assemble_elastic_stiffness(xPhys)
-        K_free = K_full[self.free_dofs, :][:, self.free_dofs]
+            K_full = self.opt.assemble_elastic_stiffness(xPhys)
+            K_free = K_full[self.free_dofs, :][:, self.free_dofs]
 
-        x0 = self.u_free_prev if (self.u_free_prev is not None and len(self.u_free_prev) == len(self.free_dofs)) else None
-        u_free, _, _ = self.opt.solve_linear_system(
-            K_free, F_free, x0=x0, solver_type=self.solver_type
-        )
-        self.u_free_prev = u_free.copy()
-
-        U = np.zeros(self.opt.num_dofs, dtype=np.float64)
-        U[self.free_dofs] = u_free
-
-        # 4. Compliance and Strain Energy
-        U_e = U[self.opt.edofMat]
-        E_elements = self.opt.Emin + (xPhys ** self.opt.penal) * (self.opt.E0 - self.opt.Emin)
-        ce = np.sum((U_e @ self.opt.k0) * U_e, axis=1)
-        compliance = float(np.sum(E_elements * ce))
-
-        if self.has_thermal:
-            # 4b. Coupled Adjoint Thermal Solve and Exact 3-Term Sensitivities
-            P = self.opt.solve_thermal_adjoint(xPhys, U, solver_type=self.solver_type)
-            self.P = P
-            dc_comp, _, _, _ = self.opt.compute_thermo_elastic_sensitivities(
-                xPhys, U, self.T, P, q_ramp=8.0, penal_th=3.0, solver_type=self.solver_type
+            x0 = self.u_free_prev if (self.u_free_prev is not None and len(self.u_free_prev) == len(self.free_dofs)) else None
+            u_free, _, _ = self.opt.solve_linear_system(
+                K_free, F_free, x0=x0, solver_type=self.solver_type
             )
-        else:
-            dc_comp = -self.opt.penal * (self.opt.E0 - self.opt.Emin) * (xPhys ** (self.opt.penal - 1.0)) * ce
+            self.u_free_prev = u_free.copy()
 
-        # 5. Linearized Buckling Stability (if coupled mode)
-        if self.opt_alpha > 0.0 or self.mode == "buckling_max":
+            U = np.zeros(self.opt.num_dofs, dtype=np.float64)
+            U[self.free_dofs] = u_free
+
+            # 4. Compliance and Strain Energy
+            U_e = U[self.opt.edofMat]
+            E_elements = self.opt.Emin + (xPhys ** self.opt.penal) * (self.opt.E0 - self.opt.Emin)
+            ce = np.sum((U_e @ self.opt.k0) * U_e, axis=1)
+            compliance = float(np.sum(E_elements * ce))
+
+            if self.has_thermal or self.mode == "thermo_elastic":
+                # 4b. Coupled Adjoint Thermal Solve and Exact 3-Term Sensitivities
+                P = self.opt.solve_thermal_adjoint(xPhys, U, solver_type=self.solver_type)
+                self.P = P
+                dc_comp, _, _, _ = self.opt.compute_thermo_elastic_sensitivities(
+                    xPhys, U, self.T, P, q_ramp=8.0, penal_th=3.0, solver_type=self.solver_type
+                )
+            else:
+                dc_comp = -self.opt.penal * (self.opt.E0 - self.opt.Emin) * (xPhys ** (self.opt.penal - 1.0)) * ce
+
+        # 5. Linearized Buckling Stability (if coupled mode and not thermal compliance)
+        if self.mode != "thermal_compliance" and (self.opt_alpha > 0.0 or self.mode == "buckling_max"):
             sigma_all = U_e @ self.opt.DB0_T
             E_G = (xPhys ** self.opt.penal_g)
 
@@ -769,6 +788,7 @@ class SIMPOptimizer3D:
         volfrac: float = 0.3,
         alpha: float = 0.0,
         T_ref: float = 0.0,
+        alpha_th: float = 1.0,
         solver_type: str = "amg",  # "amg", "pcg", or "direct"
         optimizer_type: str = "mma",  # "mma" or "oc"
         max_iter: int = 50,
@@ -790,6 +810,7 @@ class SIMPOptimizer3D:
         self.volfrac = float(volfrac)
         self.alpha = float(alpha)
         self.T_ref = float(T_ref)
+        self._alpha_th = float(alpha_th)
         self.solver_type = str(solver_type).lower()
         self.optimizer_type = str(optimizer_type).lower()
         self.max_iter = int(max_iter)
@@ -808,7 +829,7 @@ class SIMPOptimizer3D:
 
         # 1b. Precompute Thermal Matrices
         self.k_th0 = h8_thermal_conductivity_kth0(self.dx, self.dy, self.dz, k_th=1.0)
-        self.f_th0 = h8_thermal_expansion_force_fth0(self.dx, self.dy, self.dz, 1.0, self.nu, alpha_th=1.0)
+        self.f_th0 = h8_thermal_expansion_force_fth0(self.dx, self.dy, self.dz, 1.0, self.nu, alpha_th=self._alpha_th)
 
         # 2. Precompute 6 Geometric Stiffness Basis Matrices
         G0_dict = geometric_stiffness_basis_matrices(self.dx, self.dy, self.dz)
@@ -841,6 +862,15 @@ class SIMPOptimizer3D:
 
         # Non-Design Spaces
         self.passive_solid = np.zeros(self.num_elements, dtype=bool)
+
+    @property
+    def alpha_th(self) -> float:
+        return self._alpha_th
+
+    @alpha_th.setter
+    def alpha_th(self, val: float):
+        self._alpha_th = float(val)
+        self.f_th0 = h8_thermal_expansion_force_fth0(self.dx, self.dy, self.dz, 1.0, self.nu, alpha_th=self._alpha_th)
 
     def _build_thermal_edof_matrix(self) -> np.ndarray:
         """
@@ -1217,6 +1247,27 @@ class SIMPOptimizer3D:
         dc_total = term1 + term2 + term3
         return dc_total, term1, term2, term3
 
+    def compute_thermal_compliance(
+        self,
+        xPhys: np.ndarray,
+        T: np.ndarray,
+        penal_th: float = 3.0
+    ) -> Tuple[float, np.ndarray]:
+        """
+        Computes thermal compliance C_th = T^T K_th T and exact analytical sensitivities:
+            C_th = sum_e k(x_e) * (T_e^T k_th0 T_e)
+            dC_th/dx_e = - penal_th * x_e^(penal_th - 1) * (1 - Emin) * (T_e^T k_th0 T_e)
+        """
+        xPhys_vec = np.asarray(xPhys, dtype=np.float64).ravel()
+        T_e = T[self.edofMat_th]
+        c_th_e = np.sum((T_e @ self.k_th0) * T_e, axis=1)
+        k_elements = self.Emin + (xPhys_vec ** penal_th) * (1.0 - self.Emin)
+        C_th = float(np.sum(k_elements * c_th_e))
+
+        dk_dx = penal_th * (xPhys_vec ** (penal_th - 1.0)) * (1.0 - self.Emin)
+        dc_th = - dk_dx * c_th_e
+        return C_th, dc_th
+
     def add_load(self, i: int, j: int, k: int, fx: float = 0.0, fy: float = 0.0, fz: float = 0.0):
         """Apply concentrated point load in Newtons to node (i, j, k)."""
         nid = self.node_id(i, j, k)
@@ -1342,6 +1393,16 @@ class SIMPOptimizer3D:
         opt_type = (optimizer_type if optimizer_type is not None else self.optimizer_type).lower()
         stype = (solver_type if solver_type is not None else self.solver_type).lower()
 
+        mode_str = mode.lower().strip() if isinstance(mode, str) else "compliance"
+        if "thermal_compliance" in mode_str or "heat_exchanger" in mode_str:
+            mode_norm = "thermal_compliance"
+        elif "thermo_elastic" in mode_str or "thermoelastic" in mode_str:
+            mode_norm = "thermo_elastic"
+        elif "buckling" in mode_str:
+            mode_norm = "buckling_max"
+        else:
+            mode_norm = "compliance"
+
         opt_alpha = self.alpha
         if alpha is not None:
             opt_alpha = float(alpha)
@@ -1349,6 +1410,16 @@ class SIMPOptimizer3D:
             opt_alpha = float(alpha_buckling)
 
         # 1. Resolve Boundary Conditions and Loads
+        has_thermal = (
+            len(self.fixed_thermal_nodes) > 0
+            or np.any(np.abs(self.heat_source_vector) > 1e-12)
+        )
+        if mode_norm in ["thermo_elastic", "thermal_compliance"] and not has_thermal:
+            raise ValueError(
+                f"Optimization mode '{mode_norm}' requires thermal boundary conditions "
+                f"(fixed temperatures or heat sources) to be configured."
+            )
+
         if fixed_dofs is not None:
             active_fixed_dofs = set(int(d) for d in fixed_dofs)
         else:
@@ -1360,11 +1431,11 @@ class SIMPOptimizer3D:
         if forces is not None:
             force_vec = np.array(forces, dtype=np.float64)
         else:
-            has_thermal = (
-                len(self.fixed_thermal_nodes) > 0
-                or np.any(np.abs(self.heat_source_vector) > 1e-12)
-            )
-            if np.all(np.abs(self.force_vector) < 1e-12) and not has_thermal:
+            if (
+                np.all(np.abs(self.force_vector) < 1e-12)
+                and not has_thermal
+                and mode_norm not in ["thermal_compliance", "thermo_elastic"]
+            ):
                 # Default load: downward tip load at center of right face
                 self.add_load(self.nelx, self.nely // 2, self.nelz // 2, fz=-100.0)
             force_vec = self.force_vector.copy()
@@ -1390,7 +1461,7 @@ class SIMPOptimizer3D:
                 max_iter=max_iterations,
                 tol=convergence_tol,
                 opt_alpha=opt_alpha,
-                mode=mode,
+                mode=mode_norm,
                 cb=cb,
                 solver_type=stype
             )
@@ -1484,120 +1555,127 @@ class SIMPOptimizer3D:
                 if np.any(self.passive_solid):
                     xPhys[self.passive_solid] = 1.0
 
-                if has_thermal:
+                if mode_norm == "thermal_compliance":
                     T_res = self.solve_thermal(xPhys, solver_type=stype)
-                    T_e = T_res[self.edofMat_th]
-                    dT_elements = np.mean(T_e, axis=1) - self.T_ref
-                    F_th = self.assemble_thermal_load_vector(xPhys, dT_elements, q_ramp=8.0)
-                    F_total = force_vec + F_th
-                    F_free = F_total[free_dofs]
+                    compliance, dc_comp = self.compute_thermal_compliance(xPhys, T_res, penal_th=3.0)
+                    c_history.append(compliance)
+                    U = np.zeros(self.num_dofs, dtype=np.float64)
+                    sens_total = dc_comp
                 else:
-                    F_free = force_vec[free_dofs]
+                    if has_thermal or mode_norm == "thermo_elastic":
+                        T_res = self.solve_thermal(xPhys, solver_type=stype)
+                        T_e = T_res[self.edofMat_th]
+                        dT_elements = np.mean(T_e, axis=1) - self.T_ref
+                        F_th = self.assemble_thermal_load_vector(xPhys, dT_elements, q_ramp=8.0)
+                        F_total = force_vec + F_th
+                        F_free = F_total[free_dofs]
+                    else:
+                        F_free = force_vec[free_dofs]
 
-                K_full = self.assemble_elastic_stiffness(xPhys)
-                K_free = K_full[free_dofs, :][:, free_dofs]
+                    K_full = self.assemble_elastic_stiffness(xPhys)
+                    K_free = K_full[free_dofs, :][:, free_dofs]
 
-                x0 = u_free_prev if (u_free_prev is not None and len(u_free_prev) == len(free_dofs)) else None
-                u_free, _, _ = self.solve_linear_system(K_free, F_free, x0=x0, solver_type=stype)
-                u_free_prev = u_free.copy()
+                    x0 = u_free_prev if (u_free_prev is not None and len(u_free_prev) == len(free_dofs)) else None
+                    u_free, _, _ = self.solve_linear_system(K_free, F_free, x0=x0, solver_type=stype)
+                    u_free_prev = u_free.copy()
 
-                U = np.zeros(self.num_dofs, dtype=np.float64)
-                U[free_dofs] = u_free
+                    U = np.zeros(self.num_dofs, dtype=np.float64)
+                    U[free_dofs] = u_free
 
-                U_e = U[self.edofMat]
-                E_elements = self.Emin + (xPhys ** self.penal) * (self.E0 - self.Emin)
-                ce = np.sum((U_e @ self.k0) * U_e, axis=1)
-                compliance = float(np.sum(E_elements * ce))
-                c_history.append(compliance)
+                    U_e = U[self.edofMat]
+                    E_elements = self.Emin + (xPhys ** self.penal) * (self.E0 - self.Emin)
+                    ce = np.sum((U_e @ self.k0) * U_e, axis=1)
+                    compliance = float(np.sum(E_elements * ce))
+                    c_history.append(compliance)
 
-                if has_thermal:
-                    P = self.solve_thermal_adjoint(xPhys, U, solver_type=stype)
-                    dc_comp, _, _, _ = self.compute_thermo_elastic_sensitivities(
-                        xPhys, U, T_res, P, q_ramp=8.0, penal_th=3.0, solver_type=stype
-                    )
-                else:
-                    dc_comp = -self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0)) * ce
+                    if has_thermal or mode_norm == "thermo_elastic":
+                        P = self.solve_thermal_adjoint(xPhys, U, solver_type=stype)
+                        dc_comp, _, _, _ = self.compute_thermo_elastic_sensitivities(
+                            xPhys, U, T_res, P, q_ramp=8.0, penal_th=3.0, solver_type=stype
+                        )
+                    else:
+                        dc_comp = -self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0)) * ce
 
-                if opt_alpha > 0.0 or mode == "buckling_max":
-                    sigma_all = U_e @ self.DB0_T
-                    E_G = (xPhys ** self.penal_g)
+                    if opt_alpha > 0.0 or mode_norm == "buckling_max":
+                        sigma_all = U_e @ self.DB0_T
+                        E_G = (xPhys ** self.penal_g)
 
-                    G_full = self.assemble_geometric_stiffness(xPhys, sigma_all)
-                    G_free = G_full[free_dofs, :][:, free_dofs]
+                        G_full = self.assemble_geometric_stiffness(xPhys, sigma_all)
+                        G_free = G_full[free_dofs, :][:, free_dofs]
 
-                    try:
-                        k_req = min(5, G_free.shape[0] - 2)
-                        if k_req > 0:
-                            sigma = 1e-6
-                            A_shift = K_free + sigma * G_free
-                            diag_A = A_shift.diagonal()
-                            diag_safe = np.where(np.abs(diag_A) > 1e-12, diag_A, 1.0)
-                            M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=A_shift.shape, format="csr")
+                        try:
+                            k_req = min(5, G_free.shape[0] - 2)
+                            if k_req > 0:
+                                sigma = 1e-6
+                                A_shift = K_free + sigma * G_free
+                                diag_A = A_shift.diagonal()
+                                diag_safe = np.where(np.abs(diag_A) > 1e-12, diag_A, 1.0)
+                                M_jacobi = sp.diags(1.0 / diag_safe, 0, shape=A_shift.shape, format="csr")
 
-                            def matvec_shift(b):
-                                x_sh, _ = sla.cg(A_shift, b, M=M_jacobi, rtol=1e-5, maxiter=2000)
-                                return x_sh
+                                def matvec_shift(b):
+                                    x_sh, _ = sla.cg(A_shift, b, M=M_jacobi, rtol=1e-5, maxiter=2000)
+                                    return x_sh
 
-                            OPinv = sla.LinearOperator(matvec=matvec_shift, shape=A_shift.shape, dtype=float)
-                            evals, evecs = sla.eigsh(
-                                K_free, M=-G_free, k=k_req, sigma=sigma, OPinv=OPinv,
-                                mode='buckling', which='LM', tol=1e-3, maxiter=1000
-                            )
-                            mu_all = 1.0 / evals
-                            idx_sort = np.argsort(mu_all)[::-1]
-                            mu_1 = float(mu_all[idx_sort[0]])
-                            phi_free = evecs[:, idx_sort[0]].copy()
-                            norm_phi = np.sqrt(np.maximum(1e-16, phi_free @ (K_free @ phi_free)))
-                            phi_free /= norm_phi
-                        else:
+                                OPinv = sla.LinearOperator(matvec=matvec_shift, shape=A_shift.shape, dtype=float)
+                                evals, evecs = sla.eigsh(
+                                    K_free, M=-G_free, k=k_req, sigma=sigma, OPinv=OPinv,
+                                    mode='buckling', which='LM', tol=1e-3, maxiter=1000
+                                )
+                                mu_all = 1.0 / evals
+                                idx_sort = np.argsort(mu_all)[::-1]
+                                mu_1 = float(mu_all[idx_sort[0]])
+                                phi_free = evecs[:, idx_sort[0]].copy()
+                                norm_phi = np.sqrt(np.maximum(1e-16, phi_free @ (K_free @ phi_free)))
+                                phi_free /= norm_phi
+                            else:
+                                mu_1 = 1e-6
+                                phi_free = np.ones(len(free_dofs)) / np.sqrt(max(1, len(free_dofs)))
+                        except Exception:
                             mu_1 = 1e-6
                             phi_free = np.ones(len(free_dofs)) / np.sqrt(max(1, len(free_dofs)))
-                    except Exception:
-                        mu_1 = 1e-6
-                        phi_free = np.ones(len(free_dofs)) / np.sqrt(max(1, len(free_dofs)))
 
-                    blf = 1.0 / mu_1 if mu_1 > 1e-12 else 1e12
-                    blf_history.append(float(blf))
+                        blf = 1.0 / mu_1 if mu_1 > 1e-12 else 1e12
+                        blf_history.append(float(blf))
 
-                    phi = np.zeros(self.num_dofs, dtype=np.float64)
-                    phi[free_dofs] = phi_free
-                    phi_e = phi[self.edofMat]
+                        phi = np.zeros(self.num_dofs, dtype=np.float64)
+                        phi[free_dofs] = phi_free
+                        phi_e = phi[self.edofMat]
 
-                    P_e = np.zeros((self.num_elements, 6), dtype=np.float64)
-                    for k in range(6):
-                        P_e[:, k] = np.sum((phi_e @ self.G0_bases_arr[k]) * phi_e, axis=1)
+                        P_e = np.zeros((self.num_elements, 6), dtype=np.float64)
+                        for k in range(6):
+                            P_e[:, k] = np.sum((phi_e @ self.G0_bases_arr[k]) * phi_e, axis=1)
 
-                    phi_kGe_phi = np.sum(sigma_all * P_e, axis=1)
-                    term1 = (self.opt.penal_g * (xPhys ** (self.opt.penal_g - 1.0))) * phi_kGe_phi
+                        phi_kGe_phi = np.sum(sigma_all * P_e, axis=1)
+                        term1 = (self.penal_g * (xPhys ** (self.penal_g - 1.0))) * phi_kGe_phi
 
-                    phi_k0_phi = np.sum((phi_e @ self.k0) * phi_e, axis=1)
-                    term2 = mu_1 * (self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0))) * phi_k0_phi
+                        phi_k0_phi = np.sum((phi_e @ self.k0) * phi_e, axis=1)
+                        term2 = mu_1 * (self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0))) * phi_k0_phi
 
-                    adj_L_e = (P_e @ (self.D @ self.B0)) * E_G[:, None]
-                    F_adj = np.zeros(self.num_dofs, dtype=np.float64)
-                    np.add.at(F_adj, self.edofMat, adj_L_e)
+                        adj_L_e = (P_e @ (self.D @ self.B0)) * E_G[:, None]
+                        F_adj = np.zeros(self.num_dofs, dtype=np.float64)
+                        np.add.at(F_adj, self.edofMat, adj_L_e)
 
-                    w_free, _, _ = self.solve_linear_system(K_free, F_adj[free_dofs], solver_type=stype)
-                    w = np.zeros(self.num_dofs, dtype=np.float64)
-                    w[free_dofs] = w_free
-                    w_e = w[self.edofMat]
+                        w_free, _, _ = self.solve_linear_system(K_free, F_adj[free_dofs], solver_type=stype)
+                        w = np.zeros(self.num_dofs, dtype=np.float64)
+                        w[free_dofs] = w_free
+                        w_e = w[self.edofMat]
 
-                    w_k0_u = np.sum((w_e @ self.k0) * U_e, axis=1)
-                    term3 = (self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0))) * w_k0_u
+                        w_k0_u = np.sum((w_e @ self.k0) * U_e, axis=1)
+                        term3 = (self.penal * (self.E0 - self.Emin) * (xPhys ** (self.penal - 1.0))) * w_k0_u
 
-                    d_mu = -(term1 + term2 - term3)
+                        d_mu = -(term1 + term2 - term3)
 
-                    scale_comp = float(np.mean(np.abs(dc_comp)))
-                    scale_mu = float(np.mean(np.abs(d_mu)))
-                    if scale_comp < 1e-12: scale_comp = 1.0
-                    if scale_mu < 1e-12: scale_mu = 1.0
+                        scale_comp = float(np.mean(np.abs(dc_comp)))
+                        scale_mu = float(np.mean(np.abs(d_mu)))
+                        if scale_comp < 1e-12: scale_comp = 1.0
+                        if scale_mu < 1e-12: scale_mu = 1.0
 
-                    sens_comp = dc_comp / scale_comp
-                    sens_mu = d_mu / scale_mu
-                    effective_alpha = float(np.clip(opt_alpha if opt_alpha > 0.0 else 0.4, 0.0, 0.95))
-                    sens_total = (1.0 - effective_alpha) * sens_comp + effective_alpha * sens_mu
-                else:
-                    sens_total = dc_comp
+                        sens_comp = dc_comp / scale_comp
+                        sens_mu = d_mu / scale_mu
+                        effective_alpha = float(np.clip(opt_alpha if opt_alpha > 0.0 else 0.4, 0.0, 0.95))
+                        sens_total = (1.0 - effective_alpha) * sens_comp + effective_alpha * sens_mu
+                    else:
+                        sens_total = dc_comp
 
                 dxPhys_dxtilde = beta * (1.0 - np.tanh(beta * (x_tilde - eta)) ** 2) / denom
 
@@ -1664,6 +1742,13 @@ class SIMPOptimizer3D:
             for k, v in stresses_raw.items()
         }
 
+        # Compute elemental temperature field (nelz, nely, nelx)
+        if T_res is not None:
+            T_elem = np.mean(T_res[self.edofMat_th], axis=1).reshape((self.nelz, self.nely, self.nelx))
+            temperature_field = T_elem
+        else:
+            temperature_field = None
+
         return SIMPResult3D(
             success=True,
             density_matrix=density_matrix,
@@ -1684,5 +1769,6 @@ class SIMPOptimizer3D:
             dz=self.dz,
             displacements=U,
             stresses=stresses_3d,
-            temperatures=T_res
+            temperatures=T_res,
+            temperature_field=temperature_field
         )

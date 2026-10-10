@@ -608,6 +608,7 @@ class TestMMAAMGThermo(unittest.TestCase):
         n_iters_cold1 = len(iters_cold1)
 
         # Step 2: Perturbed density (small step as in topology optimization)
+        np.random.seed(42)
         x2 = np.clip(x1 + np.random.uniform(-0.05, 0.05, opt.num_elements), 1e-3, 1.0)
         K2_full = opt.assemble_elastic_stiffness(x2)
         K2_free = K2_full[free_dofs, :][:, free_dofs].tocsr()
