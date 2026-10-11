@@ -469,7 +469,9 @@ def build_domain_preview_figure(
 
 
 
-    # Plotly Layout: Pitch Black Background, Minimalist Grid
+    max_dim = max(Lx, Ly, Lz, 1e-6)
+
+    # Plotly Layout: Pitch Black Background, Minimalist Grid, Exact 1:1:1 Physical Aspect Ratio
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="#000000",
@@ -482,7 +484,7 @@ def build_domain_preview_figure(
                 gridcolor="#27272a",
                 zerolinecolor="#52525b",
                 zerolinewidth=2,
-                range=[-0.05 * Lx, 1.15 * Lx]
+                range=[-0.05 * Lx, 1.05 * Lx]
             ),
             yaxis=dict(
                 title=dict(text="Y (mm)", font=dict(color="#71717a", size=16, family="Inconsolata")),
@@ -491,7 +493,7 @@ def build_domain_preview_figure(
                 gridcolor="#27272a",
                 zerolinecolor="#52525b",
                 zerolinewidth=2,
-                range=[-0.05 * Ly, 1.15 * Ly]
+                range=[-0.05 * Ly, 1.05 * Ly]
             ),
             zaxis=dict(
                 title=dict(text="Z (mm)", font=dict(color="#71717a", size=16, family="Inconsolata")),
@@ -500,9 +502,14 @@ def build_domain_preview_figure(
                 gridcolor="#27272a",
                 zerolinecolor="#52525b",
                 zerolinewidth=2,
-                range=[-0.05 * Lz, 1.15 * Lz]
+                range=[-0.05 * Lz, 1.05 * Lz]
             ),
-            aspectmode="data",
+            aspectmode="manual",
+            aspectratio=dict(
+                x=Lx / max_dim,
+                y=Ly / max_dim,
+                z=Lz / max_dim
+            ),
             camera=dict(
                 eye=dict(x=2.2, y=-2.5, z=1.5),
                 up=dict(x=0, y=0, z=1),
