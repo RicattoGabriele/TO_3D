@@ -1,6 +1,6 @@
 # 3D Topology optimization with LBA
 Still under development. For theory and formulation check TO.
-## 📁 Repository Structure
+## Repository Structure
 
 ```text
 CE-3D/
